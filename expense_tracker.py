@@ -94,23 +94,36 @@ def identity_name(viewer: str, role: str) -> str:
 
 def calc_balances(df: pd.DataFrame, identity: str) -> tuple[float, float]:
     """
-    Returns (viewer_owes, co_parent_owes).
-    Viewer perspective: if 'Me' paid, co-parent owes. If 'Other' paid, viewer owes.
+    Returns (i_owe, owed_to_me) — both always from the VIEWER'S perspective.
+    identity 'me' = Dad; identity 'mom' = Mom.
+
+    Logic:
+      - Stored payer = "Me"  → the person who logged this expense paid
+      - Stored payer = "Other" → the co-parent paid
+      - "I owe"       = viewer's share of what the CO-PARENT paid
+      - "Owed to me"  = my share of what I paid (i.e. what co-parent owes me)
     """
-    viewer_owes, other_owes = 0.0, 0.0
+    i_owe, owed_to_me = 0.0, 0.0
+
     for _, row in df.iterrows():
         if str(row.get("status", "")).lower() in ("settled",):
             continue
         amt   = float(row.get("amount", 0))
         split = float(row.get("split_pct", 50)) / 100.0
         p     = str(row.get("paid_by", "")).strip().lower()
+
         if p == "both":
             continue
+
         if p == "me":
-            other_owes  += amt * (1 - split)   # viewer paid → co-parent owes
+            # The viewer logged this expense → viewer paid → co-parent owes viewer's share
+            owed_to_me += amt * (1 - split)
+
         elif p == "other":
-            viewer_owes += amt * split           # co-parent paid → viewer owes
-    return round(viewer_owes, 2), round(other_owes, 2)
+            # Co-parent paid → viewer owes co-parent's share
+            i_owe += amt * split
+
+    return round(i_owe, 2), round(owed_to_me, 2)
 
 CATEGORIES = [
     "Groceries", "Kids", "Medical", "Transportation",
@@ -259,16 +272,20 @@ except Exception as e:
 
 # ── Balance cards ──
 if not df.empty:
-    me_owes, other_owes = calc_balances(df, identity)
-    net = other_owes - me_owes
+    i_owe, owed_to_me = calc_balances(df, identity)
+    net = owed_to_me - i_owe
 else:
-    me_owes, other_owes, net = 0.0, 0.0, 0.0
+    i_owe, owed_to_me, net = 0.0, 0.0, 0.0
 
 c1, c2, c3 = st.columns(3)
 with c1:
-    (st.error if me_owes > 0 else st.success)(f"**{my_name}** owes  \n**${me_owes:,.2f}**")
+    (st.error if i_owe > 0 else st.success)(
+        f"**{my_name}** owes  \n**${i_owe:,.2f}**"
+    )
 with c2:
-    (st.success if other_owes > 0 else st.info)(f"**{other_name}** owes you  \n**${other_owes:,.2f}**")
+    (st.success if owed_to_me > 0 else st.info)(
+        f"**{other_name}** owes you  \n**${owed_to_me:,.2f}**"
+    )
 with c3:
     if net > 0.05:
         st.metric("Net", f"+${net:,.2f}", delta="You're owed")
@@ -571,7 +588,7 @@ if not df.empty:
             df[debug_cols] if all(c in df.columns for c in debug_cols) else df,
             use_container_width=True, hide_index=True,
         )
-        st.markdown(f"**Result:** `me_owes={me_owes}`, `other_owes={other_owes}`, **net={net:+.2f}**")
+        st.markdown(f"**Result:** `i_owe={i_owe}`, `owed_to_me={owed_to_me}`, **net={net:+.2f}**")
 
 # ── Switch parent ──
 st.divider()
