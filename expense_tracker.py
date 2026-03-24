@@ -305,11 +305,17 @@ if not df.empty:
         monthly.columns = ["Month", "Total ($)"]
         st.dataframe(monthly, use_container_width=True, hide_index=True)
 
-# ── Switch identity ──
-st.divider()
-with st.expander("🔄 Switch parent identity"):
-    if st.button(f"Switch to {other_name}"):
-        st.session_state["identity"] = "mom" if identity == "me" else "me"
-        st.rerun()
+# ─── Profile switcher ──
+current = "👤 Dad" if identity == "me" else "👤 Mom"
+with st.container():
+    col_si, col_so = st.columns([1, 1])
+    with col_si:
+        st.markdown(f"**Profile:** {current}")
+    with col_so:
+        new_identity = "mom" if identity == "me" else "me"
+        new_label = "👤 Switch to Mom" if identity == "me" else "👤 Switch to Dad"
+        if st.button(new_label, use_container_width=True):
+            st.session_state["identity"] = new_identity
+            st.rerun()
 
 st.caption("Built with Streamlit · Data via Supabase · Both parents share the same live view")
