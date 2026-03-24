@@ -44,11 +44,32 @@ def get_supabase() -> Client | None:
 
 BUCKET = "receipts"
 
-def upload_receipt(supabase: Client, file_bytes: bytes, filename: str) -> str:
-    ext = filename.split(".")[-1] if "." in filename else "jpg"
-    path = f"{uuid.uuid4().hex}.{ext}"
-    supabase.storage.from_(BUCKET).upload(path, file_bytes)
-    return supabase.storage.from_(BUCKET).get_public_url(path)
+def upload_receipt(supabase: Client, file_bytes: bytes, filename: str) -> str | None:
+    """Upload to Supabase Storage, return public URL or None on failure."""
+    ext = filename.split(".")[-1].lower() if "." in filename else "jpg"
+    # Clean filename
+    name_part = filename.replace(".", "_").replace(" ", "_")
+    path = f"{uuid.uuid4().hex}_{name_part}"
+    try:
+        supabase.storage.from_(BUCKET).upload(
+            path,
+            file_bytes,
+            file_options={"content-type": _mime_type(filename)},
+        )
+        url = supabase.storage.from_(BUCKET).get_public_url(path)
+        return url if url else None
+    except Exception as e:
+        return None
+
+def _mime_type(filename: str) -> str:
+    ext = filename.lower().split(".")[-1] if "." in filename else ""
+    return {
+        "jpg":  "image/jpeg",
+        "jpeg": "image/jpeg",
+        "png":  "image/png",
+        "pdf":  "application/pdf",
+        "gif":  "image/gif",
+    }.get(ext, "application/octet-stream")
 
 def delete_receipt(supabase: Client, url: str) -> None:
     if not url:
@@ -164,22 +185,21 @@ CREATE TABLE expenses (
 );
 
 ALTER TABLE expenses ENABLE ROW LEVEL SECURITY;
-
 CREATE POLICY "Allow all" ON expenses FOR ALL USING (true) WITH CHECK (true);
 
-CREATE TABLE expenses (
-  id          SERIAL PRIMARY KEY,
-  date        DATE,
-  description TEXT,
-  category    TEXT,
-  amount      NUMERIC,
-  paid_by     TEXT,
-  split_pct   NUMERIC DEFAULT 50,
-  status      TEXT DEFAULT 'active',
-  notes       TEXT,
-  receipt_url TEXT,
-  created_at  TIMESTAMP DEFAULT NOW()
-);
+-- Storage bucket for receipts
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('receipts', 'receipts', true)
+ON CONFLICT (id) DO NOTHING;
+
+CREATE POLICY "Public read" ON storage.objects
+  FOR SELECT USING (bucket_id = 'receipts');
+
+CREATE POLICY "Public upload" ON storage.objects
+  FOR INSERT WITH CHECK (bucket_id = 'receipts');
+
+CREATE POLICY "Public delete" ON storage.objects
+  FOR DELETE USING (bucket_id = 'receipts');
     """, language="sql")
     st.markdown(
         "**Step 3:** In Supabase → **Storage** → **New bucket** → name it `receipts` "
@@ -414,27 +434,23 @@ else:
 
     st.dataframe(disp, use_container_width=True, hide_index=True)
 
-    # ── Receipt preview (no urllib) ──
+    # ── Receipt preview ──
     receipt_rows = filtered[filtered["receipt_url"].notna()]
     if not receipt_rows.empty:
         st.divider()
         st.subheader("🧾 Receipts")
         for _, r in receipt_rows.iterrows():
-            fname = r["receipt_url"].split("/")[-1].split("?")[0]
+            url = str(r["receipt_url"])
+            fname = url.split("/")[-1].split("?")[0]
             with st.container():
-                col_r, col_l = st.columns([1, 2])
-                with col_r:
-                    st.markdown(f"**#{r['id']}** — {r['description']}")
-                    # st.image handles both URLs and local paths
-                    try:
-                        st.image(r["receipt_url"], width=220, caption=f"Receipt #{r['id']}")
-                    except Exception:
-                        st.markdown(f"[🖼️ Open receipt]({r['receipt_url']})")
-                with col_l:
-                    st.markdown(f"**#{r['id']} — {r['description']}**")
-                    st.markdown(f"Amount: **${float(r['amount']):.2f}**  |  Paid by: **{r['_display_payer']}**")
-                    st.markdown(f"[🔗 Open in new tab]({r['receipt_url']})")
-                    st.markdown(f"[📥 Download receipt]({r['receipt_url']})")
+                st.markdown(f"**#{r['id']} — {r['description']}**  |  ${float(r['amount']):.2f}")
+                # Show image preview
+                try:
+                    st.image(url, width=300, caption=f"Receipt #{r['id']}")
+                except Exception:
+                    st.markdown(f"![Receipt]({url})")
+                # Download via link button (opens in new tab — works on all platforms)
+                st.link_button("📥 Open / Download Receipt", url, use_container_width=False)
                 st.divider()
 
     # ── EDIT / DELETE ──
@@ -493,7 +509,8 @@ else:
                 e_notes = st.text_input("Notes", value=str(row.get("notes") or ""), key=f"e_notes_{eid}")
 
                 if orig_url:
-                    st.markdown(f"📎 Current receipt: [Open receipt]({orig_url})")
+                    st.markdown("📎 Current receipt:")
+                    st.link_button("🧾 View / Download", orig_url)
                 e_receipt = st.file_uploader(
                     "🧾 Replace receipt (leave empty to keep current)",
                     type=["jpg", "jpeg", "png", "pdf"],
