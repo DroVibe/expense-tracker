@@ -274,7 +274,6 @@ my_name    = identity_name(identity, "Me")
 other_name = identity_name(identity, "Other")
 
 st.title("🧾 Expense Tracker")
-st.caption(f"Logged in as **{my_name}** · Both parents share the same live data")
 
 # ── Refresh button ──
 if st.button("🔄 Refresh Data", use_container_width=True):
@@ -297,15 +296,20 @@ if not df.empty:
 else:
     i_owe, owed_to_me, net = 0.0, 0.0, 0.0
 
+# ── Balance cards ──
+# "You owe" = what the current viewer owes the co-parent
+# "Owed to you" = what the co-parent owes the current viewer
 c1, c2, c3 = st.columns(3)
 with c1:
-    (st.error if i_owe > 0 else st.success)(
-        f"**{my_name}** owes  \n**${i_owe:,.2f}**"
-    )
+    if i_owe > 0.01:
+        st.error(f"**You owe**  \n**${i_owe:,.2f}**")
+    else:
+        st.success(f"**You owe**  \n**$0.00**")
 with c2:
-    (st.success if owed_to_me > 0 else st.info)(
-        f"**{other_name}** owes you  \n**${owed_to_me:,.2f}**"
-    )
+    if owed_to_me > 0.01:
+        st.success(f"**Owed to you**  \n**${owed_to_me:,.2f}**")
+    else:
+        st.info(f"**Owed to you**  \n**$0.00**")
 with c3:
     if net > 0.05:
         st.metric("Net", f"+${net:,.2f}", delta="You're owed")
@@ -313,6 +317,8 @@ with c3:
         st.metric("Net", f"-${abs(net):,.2f}", delta="You owe", delta_color="inverse")
     else:
         st.metric("Net", "$0.00", delta="All settled")
+
+st.caption(f"Logged in as **{my_name}** · **{other_name}** is the co-parent")
 
 st.divider()
 
