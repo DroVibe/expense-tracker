@@ -443,7 +443,51 @@ else:
         return f"[🧾 {fname}]({u})"
     disp["Receipt"] = filtered["receipt_url"].apply(receipt_link)
 
+    # Add a "Settle Up" action column
+    def settle_btn_id(eid, status):
+        if str(status).lower() == "settled":
+            return "✅ Settled"
+        return f"Settle #{eid}"
+    disp["Action"] = [settle_btn_id(r["id"], r["status"]) for _, r in filtered.iterrows()]
+
     st.dataframe(disp, use_container_width=True, hide_index=True)
+
+    # ── Settle Up ──
+    active = filtered[filtered["status"].str.lower() != "settled"]
+    if not active.empty:
+        st.divider()
+        st.subheader("💸 Settle Up")
+        st.markdown(
+            "Click **Settle** when a parent has paid their share. "
+            "It marks the expense as settled and removes it from active balances."
+        )
+        for _, r in active.iterrows():
+            with st.container():
+                col_s, col_d = st.columns([3, 1])
+                with col_s:
+                    amt   = float(r["amount"])
+                    split = float(r.get("split_pct", 50))
+                    your_share = round(amt * split / 100, 2)
+                    their_share = round(amt * (100 - split) / 100, 2)
+                    st.markdown(
+                        f"**#{r['id']} — {r['description']}**  "
+                        f"| ${amt:.2f} | Split: {split:.0f}%  "
+                        f"| Paid by: **{r.get('_display_payer', r.get('paid_by','?'))}**"
+                    )
+                    st.caption(
+                        f"Your share: **${your_share:.2f}**  "
+                        f"| Their share: **${their_share:.2f}**"
+                    )
+                with col_d:
+                    if st.button(f"✅ Settle #{r['id']}", key=f"settle_{r['id']}", use_container_width=True):
+                        try:
+                            update_expense(supabase, int(r["id"]), {"status": "settled"})
+                            st.success(f"✅ Expense #{r['id']} settled!")
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Failed: {e}")
+                st.divider()
 
     # ── Receipt preview ──
     receipt_rows = filtered[filtered["receipt_url"].notna()]
