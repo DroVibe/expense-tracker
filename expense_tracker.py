@@ -270,6 +270,11 @@ else:
     )
     filtered = df[mask].sort_values("date", ascending=False).reset_index(drop=True)
 
+    # Ensure all expected columns exist
+    for col in ["receipt_url"]:
+        if col not in filtered.columns:
+            filtered[col] = None
+
     # Display table
     disp = filtered[["id","date","description","category","amount","paid_by","split_pct","status","receipt_url"]].copy()
     disp["receipt_url"] = disp["receipt_url"].apply(
