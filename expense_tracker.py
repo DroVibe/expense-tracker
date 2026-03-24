@@ -8,6 +8,7 @@ import pandas as pd
 from datetime import date
 from supabase import create_client, Client
 import uuid
+import urllib.request
 
 # ─── SUPABASE CLIENT ──────────────────────────────────────────────────────────
 
@@ -107,10 +108,35 @@ if supabase is None:
     st.stop()
 
 if st.session_state["identity"] is None:
-    st.title("🧾 Expense Tracker")
-    st.markdown("### Track expenses together — simply.")
-    st.markdown("Shared tracker for **Me & Mom**. All data saved live.")
+    st.title("🧾 Co-Parent Expense Tracker")
+    st.markdown("##### Track, split, and settle expenses together — in real time.")
+    st.markdown("Both parents share the same view. All data is live and stored securely.")
     st.divider()
+
+    st.markdown("### 👋 Who's viewing the tracker?")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**👤 Me / Dad**")
+        st.caption("Track expenses you've paid. See who owes what.")
+        if st.button("Continue as Me (Dad)", use_container_width=True):
+            st.session_state["identity"] = "me"
+            st.rerun()
+    with col2:
+        st.markdown("**👤 Mom**")
+        st.caption("Track expenses you've paid. See who owes what.")
+        if st.button("Continue as Mom", use_container_width=True):
+            st.session_state["identity"] = "mom"
+            st.rerun()
+
+    st.divider()
+    col_i1, col_i2 = st.columns(2)
+    with col_i1:
+        st.markdown("**📋 What this tracker does**")
+        st.markdown("- Log any shared expense\n- Split costs fairly (default 50/50)\n- Attach receipt photos\n- Mark expenses as settled\n- Both parents see everything live")
+    with col_i2:
+        st.markdown("**🔒 How data is stored**")
+        st.markdown("- All data saved to Supabase (secure cloud DB)\n- Receipt images stored in Supabase Storage\n- No logins needed — shared URL is all you need\n- Data persists even when the app is closed")
+    st.stop()
 
     col1, col2 = st.columns(2)
     with col1:
@@ -275,11 +301,12 @@ else:
         if col not in filtered.columns:
             filtered[col] = None
 
-    # Display table
-    disp = filtered[["id","date","description","category","amount","paid_by","split_pct","status","receipt_url"]].copy()
-    disp["receipt_url"] = disp["receipt_url"].apply(
-        lambda u: f"[🧾 View](/r?receipt={u})" if u else "—"
+    # Receipt column — show as clickable text
+    filtered["_receipt_link"] = filtered["receipt_url"].apply(
+        lambda u: f"[🧾 View receipt]({u})" if u else "—"
     )
+
+    disp = filtered[["id","date","description","category","amount","paid_by","split_pct","status","_receipt_link"]].copy()
     disp.columns = [
         "ID","Date","Description","Category",
         "Amount ($)","Paid by","Split (%)","Status","Receipt",
@@ -287,11 +314,34 @@ else:
 
     st.dataframe(disp, use_container_width=True, hide_index=True)
 
-    # Receipt viewer
-    if "receipt" in st.query_params:
+    # ── Inline receipt viewer + download ──
+    receipts_with_urls = filtered[filtered["receipt_url"].notna()][["id","description","receipt_url"]].values
+    if len(receipts_with_urls):
         st.divider()
-        st.subheader("🧾 Receipt")
-        st.image(st.query_params["receipt"], width=400)
+        st.subheader("🧾 Receipts")
+        for exp_id, desc, r_url in receipts_with_urls:
+            with st.container():
+                col_r, col_d = st.columns([1, 3])
+                with col_r:
+                    st.markdown(f"**#{exp_id}** — {desc}")
+                    st.image(r_url, width=200, caption=f"Receipt #{exp_id}")
+                with col_d:
+                    st.markdown(f"**#{exp_id} — {desc}**")
+                    st.markdown(f"[🔗 Open in new tab]({r_url})")
+                    try:
+                        with urllib.request.urlopen(r_url, timeout=10) as resp:
+                            img_bytes = resp.read()
+                        fname = r_url.split("/")[-1].split("?")[0]
+                        st.download_button(
+                            "⬇️ Download receipt",
+                            data=img_bytes,
+                            file_name=f"receipt_{exp_id}_{fname}",
+                            mime="image/jpeg",
+                            use_container_width=True,
+                        )
+                    except Exception:
+                        st.warning("Could not load receipt for download.")
+                st.divider()
 
     # ── EDIT / DELETE ──
     st.divider()
