@@ -18,14 +18,15 @@ if "identity" not in st.session_state:
 
 # ─── SUPABASE CLIENT ──────────────────────────────────────────────────────────
 
-@st.cache_resource
 def get_supabase() -> Client | None:
+    """No cache — re-reads secrets on every call so Cloud redeploy picks up new values."""
     try:
-        url = st.secrets.get("SUPABASE_URL")
-        key = st.secrets.get("SUPABASE_KEY")
+        secrets = dict(st.secrets)
     except Exception:
         return None
-    if not url or not key or url == "your_url_here":
+    url = secrets.get("SUPABASE_URL") or secrets.get("supabase_url") or ""
+    key = secrets.get("SUPABASE_KEY")  or secrets.get("supabase_key")  or ""
+    if not url or not key or url == "your_url_here" or not key.startswith("eyJ"):
         return None
     try:
         return create_client(url, key)
