@@ -115,9 +115,11 @@ def identity_name(viewer: str, role: str) -> str:
 
 def calc_balances(df: pd.DataFrame) -> tuple[float, float]:
     """
-    Returns (dad_owes_mom, mom_owes_dad) — FIXED perspective, same for both parents.
-    Dad owes Mom  = Mom's share of what Dad paid  (mom's share of Dad's expenses)
-    Mom owes Dad  = Dad's share of what Mom paid  (dad's share of Mom's expenses)
+    Returns (dad_owes_mom, mom_owes_dad) — FIXED, same for both parents.
+
+    Logic:
+      - Dad owes Mom = Dad's share of expenses where MOM paid
+      - Mom owes Dad = Mom's share of expenses where DAD paid
     """
     dad_owes_mom = 0.0
     mom_owes_dad = 0.0
@@ -127,26 +129,18 @@ def calc_balances(df: pd.DataFrame) -> tuple[float, float]:
             continue
         amt   = float(row.get("amount", 0))
         split = float(row.get("split_pct", 50)) / 100.0
-        p     = str(row.get("paid_by", "")).strip().lower()
+        # paid_by is now stored as actual name: "Dad" | "Mom" | "Both"
+        p = str(row.get("paid_by", "")).strip()
 
-        if p == "both":
+        if p.lower() == "both":
             continue
 
-        if p == "me":
-            # Person who logged it paid → they are owed by the co-parent
-            # identity='me' = Dad logged it → Dad is owed by Mom
-            # identity='mom' = Mom logged it → Mom is owed by Dad
-            if identity == "me":
-                mom_owes_dad += amt * (1 - split)   # Mom owes Dad her share of Dad's expense
-            else:
-                dad_owes_mom += amt * (1 - split)   # Dad owes Mom her share of Mom's expense
-
-        elif p == "other":
-            # Co-parent paid → viewer owes their share
-            if identity == "me":
-                dad_owes_mom += amt * split   # Dad owes Mom his share of Mom's expense
-            else:
-                mom_owes_dad += amt * split   # Mom owes Dad her share of Dad's expense
+        if p == "Dad":
+            # Dad paid → Mom owes Dad her share
+            mom_owes_dad += amt * (1 - split)
+        elif p == "Mom":
+            # Mom paid → Dad owes Mom his share
+            dad_owes_mom += amt * (1 - split)
 
     return round(dad_owes_mom, 2), round(mom_owes_dad, 2)
 
@@ -357,11 +351,16 @@ with st.expander("✏️ Log a new expense", expanded=True):
                 "description": desc.strip(),
                 "category"   : cat,
                 "amount"     : round(float(amt), 2),
-                "paid_by"    : paid_by,
+                "paid_by"    : paid_by,   # already stored as Dad/Mom/Both by identity conversion below
                 "split_pct"  : float(split),
                 "status"     : status,
                 "notes"      : notes.strip() or None,
             }
+            # Convert "Me"/"Other" to actual names at save time
+            if row["paid_by"] == "Me":
+                row["paid_by"] = my_name
+            elif row["paid_by"] == "Other":
+                row["paid_by"] = other_name
             if receipt:
                 try:
                     url = upload_receipt(supabase, receipt.getvalue(), receipt.name)
@@ -415,12 +414,9 @@ else:
         if col not in filtered.columns:
             filtered[col] = None
 
-    # Map neutral payer to display name
+    # paid_by is stored as actual name — just title-case it for display
     def display_payer(p):
-        p = str(p).strip().lower()
-        if p == "me":    return my_name
-        if p == "other": return other_name
-        return p.title()
+        return str(p).strip().title()
 
     filtered["_display_payer"] = filtered["paid_by"].apply(display_payer)
 
@@ -488,13 +484,17 @@ else:
                     "Amount ($)", value=float(row["amount"]),
                     min_value=0.01, step=0.01, format="%.2f", key=f"e_amt_{eid}",
                 )
-                # Map stored payer to neutral
-                stored = str(row.get("paid_by","")).strip().lower()
-                payer_map = {"me": "Me", "other": "Other", "both": "Both"}
-                neutral_stored = payer_map.get(stored, "Me")
+                # Map stored name back to Me/Other for editing
+                stored = str(row.get("paid_by", "")).strip()
+                if stored == my_name:
+                    neutral = "Me"
+                elif stored == other_name:
+                    neutral = "Other"
+                else:
+                    neutral = "Both"
                 e_payer = st.selectbox(
                     "Who paid?", ["Me", "Other", "Both"],
-                    index=["Me", "Other", "Both"].index(neutral_stored),
+                    index=["Me", "Other", "Both"].index(neutral),
                     key=f"e_payer_{eid}",
                 )
                 e_split = st.slider(
@@ -532,11 +532,15 @@ else:
                         "description": e_desc.strip(),
                         "category"   : e_cat,
                         "amount"     : round(float(e_amt), 2),
-                        "paid_by"    : e_payer,
+                        "paid_by"    : e_payer,   # converted to name below
                         "split_pct"  : float(e_split),
                         "status"     : e_stat,
                         "notes"      : e_notes.strip() or None,
                     }
+                    if new_row["paid_by"] == "Me":
+                        new_row["paid_by"] = my_name
+                    elif new_row["paid_by"] == "Other":
+                        new_row["paid_by"] = other_name
                     if e_receipt:
                         try:
                             new_url = upload_receipt(supabase, e_receipt.getvalue(), e_receipt.name)
