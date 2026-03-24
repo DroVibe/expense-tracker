@@ -333,28 +333,44 @@ else:
         st.divider()
         st.subheader("🧾 Receipts")
         for exp_id, desc, r_url in receipts_with_urls:
+            # Try to fetch for preview + download; fall back to link-only
+            img_bytes = None
+            fname = r_url.split("/")[-1].split("?")[0]
+            img_mime = "image/jpeg" if fname.lower().endswith((".jpg","jpeg",".png")) else "application/pdf"
+
+            try:
+                req = urllib.request.Request(r_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    img_bytes = resp.read()
+            except Exception:
+                img_bytes = None
+
             with st.container():
                 col_r, col_d = st.columns([1, 3])
                 with col_r:
                     st.markdown(f"**#{exp_id}** — {desc}")
-                    st.image(r_url, width=200, caption=f"Receipt #{exp_id}")
+                    if img_bytes:
+                        st.image(img_bytes, width=200, caption=f"Receipt #{exp_id}")
+                    else:
+                        st.markdown(f"[🖼️ Open receipt]({r_url})")
                 with col_d:
                     st.markdown(f"**#{exp_id} — {desc}**")
                     st.markdown(f"[🔗 Open in new tab]({r_url})")
-                    try:
-                        with urllib.request.urlopen(r_url, timeout=10) as resp:
-                            img_bytes = resp.read()
-                        fname = r_url.split("/")[-1].split("?")[0]
+                    if img_bytes:
                         st.download_button(
                             "⬇️ Download receipt",
                             data=img_bytes,
                             file_name=f"receipt_{exp_id}_{fname}",
-                            mime="image/jpeg",
+                            mime=img_mime,
                             use_container_width=True,
                         )
-                    except Exception:
-                        st.warning("Could not load receipt for download.")
+                    else:
+                        st.warning("⚠️ Receipt could not be loaded for download. Use 'Open in new tab' instead.")
                 st.divider()
+    elif df["receipt_url"].notna().any():
+        st.divider()
+        st.subheader("🧾 Receipts")
+        st.info("Some receipts exist but are hidden by current filters. Adjust filters to see them.")
 
     # ── EDIT / DELETE ──
     st.divider()
@@ -454,6 +470,29 @@ else:
                     st.rerun()
                 except Exception as e:
                     st.error(f"❌ Delete failed: {e}")
+
+# ── Debug: raw data + balance math ──
+with st.expander("🔧 Debug: Raw Data & Balance Math"):
+    st.markdown(f"**Identity:** `{identity}` → `my_name={my_name}`, `other_name={other_name}`")
+    if not df.empty:
+        debug_df = df[["id","date","description","amount","paid_by","split_pct","status"]].copy()
+        debug_df["paid_by_raw"] = debug_df["paid_by"]
+        st.dataframe(debug_df[["id","description","amount","paid_by_raw","split_pct","status"]], use_container_width=True, hide_index=True)
+        st.markdown("**Calculation (active only):**")
+        for _, row in df.iterrows():
+            if str(row.get("status","")).lower() in ("settled",): continue
+            amt = float(row.get("amount",0))
+            split = float(row.get("split_pct",50))/100
+            p = str(row.get("paid_by","")).lower()
+            if p == "me":
+                st.info(f"  #{row['id']} {row['description'][:30]} — Viewer paid ${amt:.2f} → `other_owes` += ${amt*(1-split):.2f}")
+            elif p == "other":
+                st.info(f"  #{row['id']} {row['description'][:30]} — Co-parent paid ${amt:.2f} → `me_owes` += ${amt*split:.2f}")
+            else:
+                st.info(f"  #{row['id']} {row['description'][:30]} — Both, skipped")
+        st.markdown(f"**Result:** `me_owes={me_owes}`, `other_owes={other_owes}`, **net={net:+.2f}**")
+    else:
+        st.info("No expenses yet.")
 
 # ── Monthly + Category summary ──
 if not df.empty:
