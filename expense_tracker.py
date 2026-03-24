@@ -8,32 +8,50 @@ import pandas as pd
 from datetime import date
 from supabase import create_client, Client
 import uuid
-import urllib.request
+
+# ─── PAGE CONFIG ──────────────────────────────────────────────────────────────
+
+st.set_page_config(
+    page_title="Co-Parent Expense Tracker",
+    page_icon="🧾",
+    layout="centered",
+)
+
+# ─── SESSION STATE ───────────────────────────────────────────────────────────
+
+if "identity" not in st.session_state:
+    st.session_state["identity"] = None
 
 # ─── SUPABASE CLIENT ──────────────────────────────────────────────────────────
 
 @st.cache_resource
-def get_supabase() -> Client:
-    url = st.secrets.get("SUPABASE_URL")
-    key = st.secrets.get("SUPABASE_KEY")
-    if not url or not key:
+def get_supabase() -> Client | None:
+    """Return Supabase client, or None if secrets are missing/invalid."""
+    try:
+        url = st.secrets.get("SUPABASE_URL")
+        key = st.secrets.get("SUPABASE_KEY")
+    except Exception:
+        url, key = None, None
+
+    if not url or not key or url == "your_url_here":
         return None
-    return create_client(url, key)
+    try:
+        return create_client(url, key)
+    except Exception:
+        return None
 
 # ─── STORAGE HELPERS ──────────────────────────────────────────────────────────
 
 BUCKET = "receipts"
 
 def upload_receipt(supabase: Client, file_bytes: bytes, filename: str) -> str:
-    """Upload file to Supabase Storage, return public URL."""
     ext = filename.split(".")[-1] if "." in filename else "jpg"
     path = f"{uuid.uuid4().hex}.{ext}"
     supabase.storage.from_(BUCKET).upload(path, file_bytes)
     return supabase.storage.from_(BUCKET).get_public_url(path)
 
 def delete_receipt(supabase: Client, url: str) -> None:
-    """Delete receipt from storage given a public URL."""
-    if not url or not url.strip():
+    if not url:
         return
     filename = url.split("/")[-1].split("?")[0]
     if filename:
@@ -48,6 +66,9 @@ def load_expenses(supabase: Client) -> pd.DataFrame:
     result = supabase.table("expenses").select("*").order("date", desc=True).execute()
     df = pd.DataFrame(result.data or [])
     if df.empty:
+        df["date"] = pd.Series(dtype="datetime64[ns]")
+        df["amount"] = pd.Series(dtype=float)
+        df["split_pct"] = pd.Series(dtype=float)
         return df
     df["date"]      = pd.to_datetime(df["date"], errors="coerce")
     df["amount"]    = pd.to_numeric(df["amount"], errors="coerce").fillna(0).round(2)
@@ -63,124 +84,180 @@ def update_expense(supabase: Client, expense_id: int, row: dict) -> None:
 def delete_expense(supabase: Client, expense_id: int) -> None:
     supabase.table("expenses").delete().eq("id", expense_id).execute()
 
-def get_expense(supabase: Client, expense_id: int) -> dict:
-    result = supabase.table("expenses").select("*").eq("id", expense_id).execute()
-    return result.data[0] if result.data else {}
+# ─── HELPERS ──────────────────────────────────────────────────────────────────
 
-# ─── HELPERS ────────────────────────────────────────────────────────────────
-
-def identity_display_name(viewer: str, role: str) -> str:
-    """
-    Map neutral 'Me' / 'Other' to the correct display name based on who's viewing.
-    viewer: 'me' (dad) or 'mom'
-    role:   'Me'   → the viewer's own name
-            'Other'→ the co-parent's name
-    """
+def identity_name(viewer: str, role: str) -> str:
+    """Map neutral 'Me'/'Other' to Dad/Mom based on who's viewing."""
     if viewer == "me":
         return "Dad" if role == "Me" else "Mom"
-    else:  # mom
-        return "Mom" if role == "Me" else "Dad"
-
-# ─── BALANCE ─────────────────────────────────────────────────────────────────
-# paid_by stored as neutral: "Me" = the person who added the expense,
-# "Other" = the co-parent, "Both".  Balance is always from the viewer's
-# perspective so it stays correct for both parents.
+    return "Mom" if role == "Me" else "Dad"
 
 def calc_balances(df: pd.DataFrame, identity: str) -> tuple[float, float]:
     """
-    identity: 'me' (dad) or 'mom'
-    Returns (viewer_owes, viewer_is_owed) — correct regardless of who's viewing.
+    Returns (viewer_owes, co_parent_owes).
+    Viewer perspective: if 'Me' paid, co-parent owes. If 'Other' paid, viewer owes.
     """
-    me_owes, other_owes = 0.0, 0.0   # me_owes = viewer owes co-parent; other_owes = co-parent owes viewer
+    viewer_owes, other_owes = 0.0, 0.0
     for _, row in df.iterrows():
-        s = str(row.get("status", "")).lower()
-        if s in ("settled",):
+        if str(row.get("status", "")).lower() in ("settled",):
             continue
         amt   = float(row.get("amount", 0))
         split = float(row.get("split_pct", 50)) / 100.0
-        p     = str(row.get("paid_by", "")).lower()
-        if "both" in p:
+        p     = str(row.get("paid_by", "")).strip().lower()
+        if p == "both":
             continue
         if p == "me":
-            # The viewer (identity) paid → co-parent owes their share
-            other_owes += amt * (1 - split)
+            other_owes  += amt * (1 - split)   # viewer paid → co-parent owes
         elif p == "other":
-            # Co-parent paid → viewer owes their share
-            me_owes   += amt * split
-    return round(me_owes, 2), round(other_owes, 2)
+            viewer_owes += amt * split           # co-parent paid → viewer owes
+    return round(viewer_owes, 2), round(other_owes, 2)
 
-# ─── PAGE CONFIG ──────────────────────────────────────────────────────────────
+CATEGORIES = [
+    "Groceries", "Kids", "Medical", "Transportation",
+    "Entertainment", "Clothing", "School", "Other"
+]
 
-st.set_page_config(
-    page_title  = "Co-Parent Expense Tracker",
-    page_icon   = "🧾",
-    layout      = "centered",
-)
-
-# ─── LANDING / IDENTITY SELECTOR ──────────────────────────────────────────────
-
-if "identity" not in st.session_state:
-    st.session_state["identity"] = None
+# ══════════════════════════════════════════════════════════════════════════════
+#  SETUP CHECK — must run before any feature UI
+# ══════════════════════════════════════════════════════════════════════════════
 
 supabase = get_supabase()
-if supabase is None:
-    st.error("❌ Supabase not connected. Add SUPABASE_URL and SUPABASE_KEY in app secrets.")
+_is_configured = supabase is not None
+
+def render_setup_warning():
+    st.title("🧾 Co-Parent Expense Tracker")
+    st.divider()
+    st.error("⚠️ Supabase is not configured.")
+    st.markdown("### 🔧 Setup Required")
+    st.markdown(
+        "This app needs a **Supabase project** to store your expense data. "
+        "Follow these steps to get it running:\n\n"
+        "**Step 1:** Go to [supabase.com](https://supabase.com) → Create a free project.\n\n"
+        "**Step 2:** In your Supabase project, go to **SQL Editor** and run:\n"
+    )
+    st.code("""
+CREATE TABLE expenses (
+  id          SERIAL PRIMARY KEY,
+  date        DATE,
+  description TEXT,
+  category    TEXT,
+  amount      NUMERIC,
+  paid_by     TEXT,
+  split_pct   NUMERIC DEFAULT 50,
+  status      TEXT DEFAULT 'active',
+  notes       TEXT,
+  receipt_url TEXT,
+  created_at  TIMESTAMP DEFAULT NOW()
+);
+
+ALTER TABLE expenses ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow all" ON expenses FOR ALL USING (true) WITH CHECK (true);
+
+CREATE TABLE expenses (
+  id          SERIAL PRIMARY KEY,
+  date        DATE,
+  description TEXT,
+  category    TEXT,
+  amount      NUMERIC,
+  paid_by     TEXT,
+  split_pct   NUMERIC DEFAULT 50,
+  status      TEXT DEFAULT 'active',
+  notes       TEXT,
+  receipt_url TEXT,
+  created_at  TIMESTAMP DEFAULT NOW()
+);
+    """, language="sql")
+    st.markdown(
+        "**Step 3:** In Supabase → **Storage** → **New bucket** → name it `receipts` "
+        "and make it **Public**.\n\n"
+        "**Step 4:** In Supabase → **Settings → API**, copy your:\n"
+        "- `Project URL`\n"
+        "- `anon public` key\n\n"
+        "**Step 5:** Add these secrets in Streamlit Cloud:\n"
+        "→ Go to [share.streamlit.io](https://share.streamlit.io) → your app → **Settings → Secrets**\n"
+        "→ Add:\n"
+    )
+    st.code("""
+SUPABASE_URL = "https://xxxxx.supabase.co"
+SUPABASE_KEY = "eyJhbGc..."
+    """)
+    st.markdown("→ Click **Save** → the app will refresh and load your data.")
     st.stop()
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  LANDING / IDENTITY SELECTOR
+# ══════════════════════════════════════════════════════════════════════════════
+
+if not _is_configured:
+    render_setup_warning()
 
 if st.session_state["identity"] is None:
     st.title("🧾 Co-Parent Expense Tracker")
     st.markdown("##### Track, split, and settle expenses together — in real time.")
-    st.markdown("Both parents share the same view. All data is live and stored securely.")
+    st.markdown("Both parents share the same live view. All data is stored securely.")
     st.divider()
 
     st.markdown("### 👋 Who's viewing the tracker?")
-    col1, col2 = st.columns(2)
-    with col1:
+    c1, c2 = st.columns(2)
+    with c1:
         st.markdown("**👤 Me / Dad**")
-        st.caption("Track expenses you've paid. See who owes what.")
+        st.caption("Track your expenses. See who owes what.")
         if st.button("Continue as Me (Dad)", use_container_width=True):
             st.session_state["identity"] = "me"
             st.rerun()
-    with col2:
+    with c2:
         st.markdown("**👤 Mom**")
-        st.caption("Track expenses you've paid. See who owes what.")
+        st.caption("Track your expenses. See who owes what.")
         if st.button("Continue as Mom", use_container_width=True):
             st.session_state["identity"] = "mom"
             st.rerun()
 
     st.divider()
-    col_i1, col_i2 = st.columns(2)
-    with col_i1:
+    ci1, ci2 = st.columns(2)
+    with ci1:
         st.markdown("**📋 What this tracker does**")
-        st.markdown("- Log any shared expense\n- Split costs fairly (default 50/50)\n- Attach receipt photos\n- Mark expenses as settled\n- Both parents see everything live")
-    with col_i2:
+        st.markdown(
+            "- Log any shared expense\n"
+            "- Split costs fairly (default 50/50)\n"
+            "- Attach receipt photos\n"
+            "- Mark expenses as settled\n"
+            "- Both parents see everything live"
+        )
+    with ci2:
         st.markdown("**🔒 How data is stored**")
-        st.markdown("- All data saved to Supabase (secure cloud DB)\n- Receipt images stored in Supabase Storage\n- No logins needed — shared URL is all you need\n- Data persists even when the app is closed")
+        st.markdown(
+            "- All data saved to Supabase (secure cloud DB)\n"
+            "- Receipt images stored in Supabase Storage\n"
+            "- No logins needed — shared URL is all you need\n"
+            "- Data persists even when the app is closed"
+        )
     st.stop()
 
-identity       = st.session_state["identity"]
-my_name       = identity_display_name(identity, "Me")     # "Dad" or "Mom"
-other_name    = identity_display_name(identity, "Other")  # "Mom" or "Dad"
+# ─── ACTIVE APP ───────────────────────────────────────────────────────────────
 
-# ─── HEADER ───────────────────────────────────────────────────────────────────
+identity   = st.session_state["identity"]
+my_name    = identity_name(identity, "Me")
+other_name = identity_name(identity, "Other")
 
 st.title("🧾 Expense Tracker")
 st.caption(f"Logged in as **{my_name}** · Both parents share the same live data")
 
-if st.button("🔄 Refresh", use_container_width=False):
+# ── Refresh button ──
+if st.button("🔄 Refresh Data", use_container_width=True):
     st.cache_data.clear()
     st.rerun()
 
-# ─── LOAD DATA ────────────────────────────────────────────────────────────────
+st.divider()
 
+# ── Load data ──
 try:
     df = load_expenses(supabase)
 except Exception as e:
-    st.error(f"❌ Could not load data: {e}")
+    st.error(f"❌ Could not load data from Supabase: {e}")
     df = pd.DataFrame()
 
-# ─── BALANCE CARDS ────────────────────────────────────────────────────────────
-
+# ── Balance cards ──
 if not df.empty:
     me_owes, other_owes = calc_balances(df, identity)
     net = other_owes - me_owes
@@ -189,16 +266,12 @@ else:
 
 c1, c2, c3 = st.columns(3)
 with c1:
-    (st.error if me_owes > 0 else st.success)(
-        f"**{my_name}** owes\n**${me_owes:,.2f}**"
-    )
+    (st.error if me_owes > 0 else st.success)(f"**{my_name}** owes  \n**${me_owes:,.2f}**")
 with c2:
-    (st.success if other_owes > 0 else st.info)(
-        f"**{other_name}** owes\n**${other_owes:,.2f}**"
-    )
+    (st.success if other_owes > 0 else st.info)(f"**{other_name}** owes you  \n**${other_owes:,.2f}**")
 with c3:
     if net > 0.05:
-        st.metric("Net", f"+" + f"${net:,.2f}", delta="You're owed")
+        st.metric("Net", f"+${net:,.2f}", delta="You're owed")
     elif net < -0.05:
         st.metric("Net", f"-${abs(net):,.2f}", delta="You owe", delta_color="inverse")
     else:
@@ -218,22 +291,18 @@ with st.expander("✏️ Log a new expense", expanded=True):
             "Who paid?",
             ["Me", "Other", "Both"],
             horizontal=True,
-            help="Me = you (the person filling this out). Other = the co-parent."
+            help="Me = you. Other = the co-parent."
         )
-        date_in  = st.date_input("Date", value=date.today())
-        desc     = st.text_input("Description *", placeholder="e.g. Groceries at Publix")
-        cat      = st.selectbox("Category", [
-            "Groceries","Kids","Medical","Transportation",
-            "Entertainment","Clothing","School","Other"
-        ])
-        amt      = st.number_input("Amount ($) *", min_value=0.01, step=0.01, format="%.2f")
-        split    = st.slider(f"{my_name}'s split %", 0, 100, 50, step=5)
-        status   = st.selectbox("Status", ["active", "settled"])
-        notes    = st.text_input("Notes (optional)", placeholder="Any extra details…")
-        receipt  = st.file_uploader(
+        date_in = st.date_input("Date", value=date.today())
+        desc    = st.text_input("Description *", placeholder="e.g. Groceries at Publix")
+        cat     = st.selectbox("Category", CATEGORIES)
+        amt     = st.number_input("Amount ($) *", min_value=0.01, step=0.01, format="%.2f")
+        split   = st.slider(f"{my_name}'s split %", 0, 100, 50, step=5)
+        status  = st.selectbox("Status", ["active", "settled"])
+        notes   = st.text_input("Notes (optional)", placeholder="Any extra details…")
+        receipt = st.file_uploader(
             "🧾 Receipt (optional)",
-            type=["jpg","jpeg","png","pdf"],
-            help="Attach a photo or PDF of the receipt",
+            type=["jpg", "jpeg", "png", "pdf"],
         )
 
         submitted = st.form_submit_button("💾 Save Expense", use_container_width=True)
@@ -254,11 +323,10 @@ with st.expander("✏️ Log a new expense", expanded=True):
                 "status"     : status,
                 "notes"      : notes.strip() or None,
             }
-            receipt_url = None
             if receipt:
                 try:
-                    receipt_url = upload_receipt(supabase, receipt.getvalue(), receipt.name)
-                    row["receipt_url"] = receipt_url
+                    url = upload_receipt(supabase, receipt.getvalue(), receipt.name)
+                    row["receipt_url"] = url
                 except Exception as e:
                     st.warning(f"⚠️ Receipt upload failed: {e}")
             try:
@@ -281,246 +349,234 @@ if df.empty:
     st.info("No expenses yet. Add one above!")
 
 else:
-    # Filters
+    # Safe filter defaults
+    min_d = df["date"].min().date() if pd.notna(df["date"].min()) else date.today()
+    max_d = df["date"].max().date() if pd.notna(df["date"].max()) else date.today()
+
     f1, f2, f3, f4 = st.columns(4)
     with f1:
-        start = st.date_input("From", value=df["date"].min().date())
+        start = st.date_input("From", value=min_d)
     with f2:
-        end   = st.date_input("To",   value=df["date"].max().date())
+        end   = st.date_input("To",   value=max_d)
     with f3:
         cats  = ["All"] + sorted(df["category"].dropna().unique().tolist())
         cat_f = st.selectbox("Category", cats)
     with f4:
         stat_f = st.selectbox("Status", ["All", "active", "settled"])
 
-    mask = (
-        (df["date"]  >= pd.Timestamp(start)) &
-        (df["date"]  <= pd.Timestamp(end))   &
-        (df["category"] == cat_f if cat_f != "All" else True) &
-        (df["status"]   == stat_f if stat_f != "All" else True)
-    )
+    mask = pd.Series(True, index=df.index)
+    if pd.notna(start): mask &= df["date"] >= pd.Timestamp(start)
+    if pd.notna(end):   mask &= df["date"] <= pd.Timestamp(end)
+    if cat_f  != "All":  mask &= df["category"] == cat_f
+    if stat_f != "All":  mask &= df["status"] == stat_f
+
     filtered = df[mask].sort_values("date", ascending=False).reset_index(drop=True)
 
-    # Ensure all expected columns exist
     for col in ["receipt_url"]:
         if col not in filtered.columns:
             filtered[col] = None
 
-    # Map neutral "Me" / "Other" to display names based on viewer's identity
+    # Map neutral payer to display name
     def display_payer(p):
-        p = str(p).strip()
-        if p.lower() == "me":     return identity_display_name(identity, "Me")
-        if p.lower() == "other":  return identity_display_name(identity, "Other")
-        return p  # "Both" or whatever
+        p = str(p).strip().lower()
+        if p == "me":    return my_name
+        if p == "other": return other_name
+        return p.title()
 
-    # Receipt column — show as clickable text
-    filtered["_receipt_link"] = filtered["receipt_url"].apply(
-        lambda u: f"[🧾 View receipt]({u})" if u else "—"
-    )
+    filtered["_display_payer"] = filtered["paid_by"].apply(display_payer)
 
-    disp = filtered[["id","date","description","category","amount","paid_by","split_pct","status","_receipt_link"]].copy()
-    disp["paid_by"] = disp["paid_by"].apply(display_payer)
-    disp.columns = [
-        "ID","Date","Description","Category",
-        "Amount ($)","Paid by","Split (%)","Status","Receipt",
-    ]
+    disp = filtered[["id","date","description","category","amount","_display_payer","split_pct","status"]].copy()
+    disp.columns = ["ID","Date","Description","Category","Amount ($)","Paid by","Split (%)","Status"]
+
+    # Add receipt column as markdown link
+    def receipt_link(u):
+        if not u: return "—"
+        fname = u.split("/")[-1].split("?")[0]
+        return f"[🧾 {fname}]({u})"
+    disp["Receipt"] = filtered["receipt_url"].apply(receipt_link)
 
     st.dataframe(disp, use_container_width=True, hide_index=True)
 
-    # ── Inline receipt viewer + download ──
-    receipts_with_urls = filtered[filtered["receipt_url"].notna()][["id","description","receipt_url"]].values
-    if len(receipts_with_urls):
+    # ── Receipt preview (no urllib) ──
+    receipt_rows = filtered[filtered["receipt_url"].notna()]
+    if not receipt_rows.empty:
         st.divider()
         st.subheader("🧾 Receipts")
-        for exp_id, desc, r_url in receipts_with_urls:
-            # Try to fetch for preview + download; fall back to link-only
-            img_bytes = None
-            fname = r_url.split("/")[-1].split("?")[0]
-            img_mime = "image/jpeg" if fname.lower().endswith((".jpg","jpeg",".png")) else "application/pdf"
-
-            try:
-                req = urllib.request.Request(r_url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    img_bytes = resp.read()
-            except Exception:
-                img_bytes = None
-
+        for _, r in receipt_rows.iterrows():
+            fname = r["receipt_url"].split("/")[-1].split("?")[0]
             with st.container():
-                col_r, col_d = st.columns([1, 3])
+                col_r, col_l = st.columns([1, 2])
                 with col_r:
-                    st.markdown(f"**#{exp_id}** — {desc}")
-                    if img_bytes:
-                        st.image(img_bytes, width=200, caption=f"Receipt #{exp_id}")
-                    else:
-                        st.markdown(f"[🖼️ Open receipt]({r_url})")
-                with col_d:
-                    st.markdown(f"**#{exp_id} — {desc}**")
-                    st.markdown(f"[🔗 Open in new tab]({r_url})")
-                    if img_bytes:
-                        st.download_button(
-                            "⬇️ Download receipt",
-                            data=img_bytes,
-                            file_name=f"receipt_{exp_id}_{fname}",
-                            mime=img_mime,
-                            use_container_width=True,
-                        )
-                    else:
-                        st.warning("⚠️ Receipt could not be loaded for download. Use 'Open in new tab' instead.")
+                    st.markdown(f"**#{r['id']}** — {r['description']}")
+                    # st.image handles both URLs and local paths
+                    try:
+                        st.image(r["receipt_url"], width=220, caption=f"Receipt #{r['id']}")
+                    except Exception:
+                        st.markdown(f"[🖼️ Open receipt]({r['receipt_url']})")
+                with col_l:
+                    st.markdown(f"**#{r['id']} — {r['description']}**")
+                    st.markdown(f"Amount: **${float(r['amount']):.2f}**  |  Paid by: **{r['_display_payer']}**")
+                    st.markdown(f"[🔗 Open in new tab]({r['receipt_url']})")
+                    st.markdown(f"[📥 Download receipt]({r['receipt_url']})")
                 st.divider()
-    elif df["receipt_url"].notna().any():
-        st.divider()
-        st.subheader("🧾 Receipts")
-        st.info("Some receipts exist but are hidden by current filters. Adjust filters to see them.")
 
     # ── EDIT / DELETE ──
     st.divider()
-    st.subheader("✏️ Edit or Delete")
+    st.subheader("✏️ Edit or Delete an Expense")
 
-    ids = [""] + filtered["id"].tolist()
-    edit_id = st.selectbox("Select expense", ids, format_func=lambda x: f"#{x}  —  {filtered.loc[filtered['id']==x,'description'].values[0]}" if x and x in filtered["id"].values else "—")
+    exp_rows = filtered.to_dict("records")
+    if not exp_rows:
+        st.info("No expenses match your current filters.")
+    else:
+        options = {f"#{r['id']}  —  {str(r['description'])[:40]}": r["id"] for r in exp_rows}
+        labels  = list(options.keys())
+        sel     = st.selectbox("Select expense", [""] + labels)
 
-    if edit_id:
-        row = filtered[filtered["id"] == edit_id].iloc[0]
-        orig_url = str(row.get("receipt_url") or "")
+        if sel:
+            eid     = options[sel]
+            row     = filtered[filtered["id"] == eid].iloc[0]
+            orig_url = str(row.get("receipt_url") or "")
 
-        with st.form(f"edit_{edit_id}", clear_on_submit=False):
-            e_date  = st.date_input("Date", value=pd.to_datetime(row["date"]).date(), key=f"e_date_{edit_id}")
-            e_desc  = st.text_input("Description", value=row["description"], key=f"e_desc_{edit_id}")
-            e_cat   = st.selectbox("Category", [
-                "Groceries","Kids","Medical","Transportation",
-                "Entertainment","Clothing","School","Other"
-            ], index=(
-                ["Groceries","Kids","Medical","Transportation",
-                 "Entertainment","Clothing","School","Other"].index(row["category"])
-                if row["category"] in ["Groceries","Kids","Medical","Transportation",
-                                        "Entertainment","Clothing","School","Other"]
-                else 0
-            ), key=f"e_cat_{edit_id}")
-            e_amt   = st.number_input("Amount ($)", value=float(row["amount"]),
-                                      min_value=0.01, step=0.01, format="%.2f", key=f"e_amt_{edit_id}")
-            # Map stored display name back to neutral for editing
-            stored_payer = str(row.get("paid_by", "")).strip()
-            neutral_map  = {
-                identity_display_name(identity, "Me")   : "Me",
-                identity_display_name(identity, "Other"): "Other",
-                "Both": "Both",
-            }
-            neutral_payer = neutral_map.get(stored_payer, "Me")
-            payer_opts = ["Me", "Other", "Both"]
-            payer_idx  = payer_opts.index(neutral_payer)
-            e_payer = st.selectbox("Who paid?", payer_opts, index=payer_idx, key=f"e_payer_{edit_id}")
-            e_split = st.slider(f"{my_name}'s split %", 0, 100,
-                                int(row["split_pct"]), step=5, key=f"e_split_{edit_id}")
-            e_stat  = st.selectbox("Status", ["active","settled"],
-                                   index=["active","settled"].index(row["status"])
-                                   if row["status"] in ["active","settled"] else 0,
-                                   key=f"e_stat_{edit_id}")
-            e_notes = st.text_input("Notes", value=row.get("notes") or "",
-                                    key=f"e_notes_{edit_id}")
+            with st.form(f"edit_{eid}", clear_on_submit=False):
+                e_date = st.date_input(
+                    "Date",
+                    value=pd.to_datetime(row["date"]).date() if pd.notna(row["date"]) else date.today(),
+                    key=f"e_date_{eid}",
+                )
+                e_desc = st.text_input("Description", value=str(row["description"] or ""), key=f"e_desc_{eid}")
+                e_cat  = st.selectbox(
+                    "Category", CATEGORIES,
+                    index=CATEGORIES.index(row["category"]) if row["category"] in CATEGORIES else 0,
+                    key=f"e_cat_{eid}",
+                )
+                e_amt  = st.number_input(
+                    "Amount ($)", value=float(row["amount"]),
+                    min_value=0.01, step=0.01, format="%.2f", key=f"e_amt_{eid}",
+                )
+                # Map stored payer to neutral
+                stored = str(row.get("paid_by","")).strip().lower()
+                payer_map = {"me": "Me", "other": "Other", "both": "Both"}
+                neutral_stored = payer_map.get(stored, "Me")
+                e_payer = st.selectbox(
+                    "Who paid?", ["Me", "Other", "Both"],
+                    index=["Me", "Other", "Both"].index(neutral_stored),
+                    key=f"e_payer_{eid}",
+                )
+                e_split = st.slider(
+                    f"{my_name}'s split %", 0, 100,
+                    int(float(row.get("split_pct", 50))), step=5,
+                    key=f"e_split_{eid}",
+                )
+                e_stat = st.selectbox(
+                    "Status", ["active", "settled"],
+                    index=["active", "settled"].index(row.get("status","active"))
+                    if row.get("status","active") in ["active","settled"] else 0,
+                    key=f"e_stat_{eid}",
+                )
+                e_notes = st.text_input("Notes", value=str(row.get("notes") or ""), key=f"e_notes_{eid}")
 
-            # Receipt management
-            if orig_url:
-                st.markdown(f"📎 Current receipt: [{orig_url.split('/')[-1]}]({orig_url})")
-            e_receipt = st.file_uploader(
-                "🧾 Replace receipt (leave empty to keep current)",
-                type=["jpg","jpeg","png","pdf"],
-                key=f"e_receipt_{edit_id}",
-            )
+                if orig_url:
+                    st.markdown(f"📎 Current receipt: [Open receipt]({orig_url})")
+                e_receipt = st.file_uploader(
+                    "🧾 Replace receipt (leave empty to keep current)",
+                    type=["jpg", "jpeg", "png", "pdf"],
+                    key=f"e_receipt_{eid}",
+                )
 
-            col_upd, col_del = st.columns(2)
-            with col_upd:
-                upd_btn = st.form_submit_button("💾 Update", use_container_width=True)
-            with col_del:
-                del_btn = st.form_submit_button("🗑️ Delete", use_container_width=True)
+                cu, cd = st.columns(2)
+                with cu:
+                    upd = st.form_submit_button("💾 Update", use_container_width=True)
+                with cd:
+                    del_ = st.form_submit_button("🗑️ Delete", use_container_width=True,
+                                                  type="primary")
 
-            if upd_btn:
-                new_row = {
-                    "date"       : str(e_date),
-                    "description": e_desc.strip(),
-                    "category"   : e_cat,
-                    "amount"     : round(float(e_amt), 2),
-                    "paid_by"    : e_payer,
-                    "split_pct"  : float(e_split),
-                    "status"     : e_stat,
-                    "notes"      : e_notes.strip() or None,
-                }
-                if e_receipt:
+                if upd:
+                    new_row = {
+                        "date"       : str(e_date),
+                        "description": e_desc.strip(),
+                        "category"   : e_cat,
+                        "amount"     : round(float(e_amt), 2),
+                        "paid_by"    : e_payer,
+                        "split_pct"  : float(e_split),
+                        "status"     : e_stat,
+                        "notes"      : e_notes.strip() or None,
+                    }
+                    if e_receipt:
+                        try:
+                            new_url = upload_receipt(supabase, e_receipt.getvalue(), e_receipt.name)
+                            if orig_url:
+                                delete_receipt(supabase, orig_url)
+                            new_row["receipt_url"] = new_url
+                        except Exception as e:
+                            st.warning(f"⚠️ Receipt upload failed: {e}")
                     try:
-                        new_url = upload_receipt(supabase, e_receipt.getvalue(), e_receipt.name)
+                        update_expense(supabase, int(eid), new_row)
+                        st.success("✅ Updated!")
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Update failed: {e}")
+
+                if del_:
+                    try:
                         if orig_url:
                             delete_receipt(supabase, orig_url)
-                        new_row["receipt_url"] = new_url
+                        delete_expense(supabase, int(eid))
+                        st.success("🗑️ Deleted!")
+                        st.cache_data.clear()
+                        st.rerun()
                     except Exception as e:
-                        st.warning(f"⚠️ Receipt upload failed: {e}")
-                try:
-                    update_expense(supabase, int(edit_id), new_row)
-                    st.success("✅ Updated!")
-                    st.cache_data.clear()
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ Update failed: {e}")
-
-            if del_btn:
-                try:
-                    if orig_url:
-                        delete_receipt(supabase, orig_url)
-                    delete_expense(supabase, int(edit_id))
-                    st.success("🗑️ Deleted!")
-                    st.cache_data.clear()
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ Delete failed: {e}")
-
-# ── Debug: raw data + balance math ──
-with st.expander("🔧 Debug: Raw Data & Balance Math"):
-    st.markdown(f"**Identity:** `{identity}` → `my_name={my_name}`, `other_name={other_name}`")
-    if not df.empty:
-        debug_df = df[["id","date","description","amount","paid_by","split_pct","status"]].copy()
-        debug_df["paid_by_raw"] = debug_df["paid_by"]
-        st.dataframe(debug_df[["id","description","amount","paid_by_raw","split_pct","status"]], use_container_width=True, hide_index=True)
-        st.markdown("**Calculation (active only):**")
-        for _, row in df.iterrows():
-            if str(row.get("status","")).lower() in ("settled",): continue
-            amt = float(row.get("amount",0))
-            split = float(row.get("split_pct",50))/100
-            p = str(row.get("paid_by","")).lower()
-            if p == "me":
-                st.info(f"  #{row['id']} {row['description'][:30]} — Viewer paid ${amt:.2f} → `other_owes` += ${amt*(1-split):.2f}")
-            elif p == "other":
-                st.info(f"  #{row['id']} {row['description'][:30]} — Co-parent paid ${amt:.2f} → `me_owes` += ${amt*split:.2f}")
-            else:
-                st.info(f"  #{row['id']} {row['description'][:30]} — Both, skipped")
-        st.markdown(f"**Result:** `me_owes={me_owes}`, `other_owes={other_owes}`, **net={net:+.2f}**")
-    else:
-        st.info("No expenses yet.")
+                        st.error(f"❌ Delete failed: {e}")
 
 # ── Monthly + Category summary ──
 if not df.empty:
     st.divider()
-    col_m, col_c = st.columns(2)
-    with col_m:
+    cm, cc = st.columns(2)
+    with cm:
         st.subheader("📅 Monthly")
         monthly = (
-            filtered.groupby(filtered["date"].dt.to_period("M"))["amount"]
-            .sum().reset_index()
+            filtered
+            .groupby(filtered["date"].dt.to_period("M"))["amount"]
+            .sum()
+            .reset_index()
         )
-        monthly["date"] = monthly["date"].astype(str).sort_values(key=lambda x: x, ascending=False)
-        monthly.columns = ["Month", "Total ($)"]
-        st.dataframe(monthly, use_container_width=True, hide_index=True)
-    with col_c:
+        if not monthly.empty:
+            monthly["date"] = monthly["date"].astype(str)
+            monthly = monthly.sort_values("date", ascending=False)
+            monthly.columns = ["Month", "Total ($)"]
+            st.dataframe(monthly, use_container_width=True, hide_index=True)
+        else:
+            st.info("No data in selected range.")
+    with cc:
         st.subheader("📂 By Category")
         cat_sum = (
             filtered.groupby("category")["amount"]
-            .agg(["sum","count"]).reset_index()
-            .rename(columns={"sum":"Total ($)","count":"#"})
+            .agg(["sum", "count"]).reset_index()
+            .rename(columns={"sum": "Total ($)", "count": "#"})
             .sort_values("Total ($)", ascending=False)
         )
-        st.dataframe(cat_sum, use_container_width=True, hide_index=True)
+        if not cat_sum.empty:
+            st.dataframe(cat_sum, use_container_width=True, hide_index=True)
+        else:
+            st.info("No data in selected range.")
+
+# ── Debug ──
+if not df.empty:
+    with st.expander("🔧 Debug: Raw Data & Balance Math"):
+        st.markdown(
+            f"**Identity:** `{identity}` → my_name=`{my_name}`, other_name=`{other_name}`"
+        )
+        debug_cols = ["id","description","amount","paid_by","split_pct","status"]
+        st.dataframe(
+            df[debug_cols] if all(c in df.columns for c in debug_cols) else df,
+            use_container_width=True, hide_index=True,
+        )
+        st.markdown(f"**Result:** `me_owes={me_owes}`, `other_owes={other_owes}`, **net={net:+.2f}**")
 
 # ── Switch parent ──
 st.divider()
 with st.expander("🔄 Switch parent identity"):
-    st.info(f"Currently logged in as **{my_name}**")
+    st.info(f"Currently viewing as **{my_name}**")
     if st.button("Switch to the other parent"):
         st.session_state["identity"] = "mom" if identity == "me" else "me"
         st.rerun()
