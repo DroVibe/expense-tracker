@@ -67,13 +67,31 @@ def get_expense(supabase: Client, expense_id: int) -> dict:
     result = supabase.table("expenses").select("*").eq("id", expense_id).execute()
     return result.data[0] if result.data else {}
 
+# ─── HELPERS ────────────────────────────────────────────────────────────────
+
+def identity_display_name(viewer: str, role: str) -> str:
+    """
+    Map neutral 'Me' / 'Other' to the correct display name based on who's viewing.
+    viewer: 'me' (dad) or 'mom'
+    role:   'Me'   → the viewer's own name
+            'Other'→ the co-parent's name
+    """
+    if viewer == "me":
+        return "Dad" if role == "Me" else "Mom"
+    else:  # mom
+        return "Mom" if role == "Me" else "Dad"
+
 # ─── BALANCE ─────────────────────────────────────────────────────────────────
+# paid_by stored as neutral: "Me" = the person who added the expense,
+# "Other" = the co-parent, "Both".  Balance is always from the viewer's
+# perspective so it stays correct for both parents.
 
-ME_LABELS   = ["me", "dad", "you", "dad's", "dro"]
-OTHER_LABELS = ["mom", "mother", "her", "she", "moms"]
-
-def calc_balances(df: pd.DataFrame) -> tuple[float, float]:
-    me_owes, other_owes = 0.0, 0.0
+def calc_balances(df: pd.DataFrame, identity: str) -> tuple[float, float]:
+    """
+    identity: 'me' (dad) or 'mom'
+    Returns (viewer_owes, viewer_is_owed) — correct regardless of who's viewing.
+    """
+    me_owes, other_owes = 0.0, 0.0   # me_owes = viewer owes co-parent; other_owes = co-parent owes viewer
     for _, row in df.iterrows():
         s = str(row.get("status", "")).lower()
         if s in ("settled",):
@@ -83,9 +101,11 @@ def calc_balances(df: pd.DataFrame) -> tuple[float, float]:
         p     = str(row.get("paid_by", "")).lower()
         if "both" in p:
             continue
-        if any(l in p for l in ME_LABELS):
+        if p == "me":
+            # The viewer (identity) paid → co-parent owes their share
             other_owes += amt * (1 - split)
-        elif any(l in p for l in OTHER_LABELS):
+        elif p == "other":
+            # Co-parent paid → viewer owes their share
             me_owes   += amt * split
     return round(me_owes, 2), round(other_owes, 2)
 
@@ -138,30 +158,14 @@ if st.session_state["identity"] is None:
         st.markdown("- All data saved to Supabase (secure cloud DB)\n- Receipt images stored in Supabase Storage\n- No logins needed — shared URL is all you need\n- Data persists even when the app is closed")
     st.stop()
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("#### 👤 I'm Dad / Me")
-        st.caption("Track expenses you've paid.")
-        if st.button("Continue as Me", use_container_width=True):
-            st.session_state["identity"] = "me"
-            st.rerun()
-    with col2:
-        st.markdown("#### 👤 I'm Mom")
-        st.caption("Track expenses you've paid.")
-        if st.button("Continue as Mom", use_container_width=True):
-            st.session_state["identity"] = "mom"
-            st.rerun()
-
-    st.stop()
-
-identity  = st.session_state["identity"]
-me_label  = "Me (Dad)" if identity == "me" else "Me (Mom)"
-other_label = "Mom"    if identity == "me" else "Dad"
+identity       = st.session_state["identity"]
+my_name       = identity_display_name(identity, "Me")     # "Dad" or "Mom"
+other_name    = identity_display_name(identity, "Other")  # "Mom" or "Dad"
 
 # ─── HEADER ───────────────────────────────────────────────────────────────────
 
 st.title("🧾 Expense Tracker")
-st.caption(f"Logged in as **{me_label}** · Both parents share the same live data")
+st.caption(f"Logged in as **{my_name}** · Both parents share the same live data")
 
 if st.button("🔄 Refresh", use_container_width=False):
     st.cache_data.clear()
@@ -178,7 +182,7 @@ except Exception as e:
 # ─── BALANCE CARDS ────────────────────────────────────────────────────────────
 
 if not df.empty:
-    me_owes, other_owes = calc_balances(df)
+    me_owes, other_owes = calc_balances(df, identity)
     net = other_owes - me_owes
 else:
     me_owes, other_owes, net = 0.0, 0.0, 0.0
@@ -186,11 +190,11 @@ else:
 c1, c2, c3 = st.columns(3)
 with c1:
     (st.error if me_owes > 0 else st.success)(
-        f"**{me_label}** owes\n**${me_owes:,.2f}**"
+        f"**{my_name}** owes\n**${me_owes:,.2f}**"
     )
 with c2:
     (st.success if other_owes > 0 else st.info)(
-        f"**{other_label}** owes\n**${other_owes:,.2f}**"
+        f"**{other_name}** owes\n**${other_owes:,.2f}**"
     )
 with c3:
     if net > 0.05:
@@ -212,8 +216,9 @@ with st.expander("✏️ Log a new expense", expanded=True):
     with st.form("add_form", clear_on_submit=True):
         paid_by = st.radio(
             "Who paid?",
-            [me_label, other_label, "Both"],
+            ["Me", "Other", "Both"],
             horizontal=True,
+            help="Me = you (the person filling this out). Other = the co-parent."
         )
         date_in  = st.date_input("Date", value=date.today())
         desc     = st.text_input("Description *", placeholder="e.g. Groceries at Publix")
@@ -222,7 +227,7 @@ with st.expander("✏️ Log a new expense", expanded=True):
             "Entertainment","Clothing","School","Other"
         ])
         amt      = st.number_input("Amount ($) *", min_value=0.01, step=0.01, format="%.2f")
-        split    = st.slider(f"{me_label.split()[0]}'s split %", 0, 100, 50, step=5)
+        split    = st.slider(f"{my_name}'s split %", 0, 100, 50, step=5)
         status   = st.selectbox("Status", ["active", "settled"])
         notes    = st.text_input("Notes (optional)", placeholder="Any extra details…")
         receipt  = st.file_uploader(
@@ -301,12 +306,20 @@ else:
         if col not in filtered.columns:
             filtered[col] = None
 
+    # Map neutral "Me" / "Other" to display names based on viewer's identity
+    def display_payer(p):
+        p = str(p).strip()
+        if p.lower() == "me":     return identity_display_name(identity, "Me")
+        if p.lower() == "other":  return identity_display_name(identity, "Other")
+        return p  # "Both" or whatever
+
     # Receipt column — show as clickable text
     filtered["_receipt_link"] = filtered["receipt_url"].apply(
         lambda u: f"[🧾 View receipt]({u})" if u else "—"
     )
 
     disp = filtered[["id","date","description","category","amount","paid_by","split_pct","status","_receipt_link"]].copy()
+    disp["paid_by"] = disp["paid_by"].apply(display_payer)
     disp.columns = [
         "ID","Date","Description","Category",
         "Amount ($)","Paid by","Split (%)","Status","Receipt",
@@ -369,10 +382,18 @@ else:
             ), key=f"e_cat_{edit_id}")
             e_amt   = st.number_input("Amount ($)", value=float(row["amount"]),
                                       min_value=0.01, step=0.01, format="%.2f", key=f"e_amt_{edit_id}")
-            payer_opts = [me_label, other_label, "Both"]
-            payer_idx  = payer_opts.index(row["paid_by"]) if row["paid_by"] in payer_opts else 0
+            # Map stored display name back to neutral for editing
+            stored_payer = str(row.get("paid_by", "")).strip()
+            neutral_map  = {
+                identity_display_name(identity, "Me")   : "Me",
+                identity_display_name(identity, "Other"): "Other",
+                "Both": "Both",
+            }
+            neutral_payer = neutral_map.get(stored_payer, "Me")
+            payer_opts = ["Me", "Other", "Both"]
+            payer_idx  = payer_opts.index(neutral_payer)
             e_payer = st.selectbox("Who paid?", payer_opts, index=payer_idx, key=f"e_payer_{edit_id}")
-            e_split = st.slider(f"{me_label.split()[0]}'s split %", 0, 100,
+            e_split = st.slider(f"{my_name}'s split %", 0, 100,
                                 int(row["split_pct"]), step=5, key=f"e_split_{edit_id}")
             e_stat  = st.selectbox("Status", ["active","settled"],
                                    index=["active","settled"].index(row["status"])
@@ -460,7 +481,7 @@ if not df.empty:
 # ── Switch parent ──
 st.divider()
 with st.expander("🔄 Switch parent identity"):
-    st.info(f"Currently logged in as **{me_label}**")
+    st.info(f"Currently logged in as **{my_name}**")
     if st.button("Switch to the other parent"):
         st.session_state["identity"] = "mom" if identity == "me" else "me"
         st.rerun()
