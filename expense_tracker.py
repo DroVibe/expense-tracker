@@ -113,18 +113,14 @@ def identity_name(viewer: str, role: str) -> str:
         return "Dad" if role == "Me" else "Mom"
     return "Mom" if role == "Me" else "Dad"
 
-def calc_balances(df: pd.DataFrame, identity: str) -> tuple[float, float]:
+def calc_balances(df: pd.DataFrame) -> tuple[float, float]:
     """
-    Returns (i_owe, owed_to_me) — both always from the VIEWER'S perspective.
-    identity 'me' = Dad; identity 'mom' = Mom.
-
-    Logic:
-      - Stored payer = "Me"  → the person who logged this expense paid
-      - Stored payer = "Other" → the co-parent paid
-      - "I owe"       = viewer's share of what the CO-PARENT paid
-      - "Owed to me"  = my share of what I paid (i.e. what co-parent owes me)
+    Returns (dad_owes_mom, mom_owes_dad) — FIXED perspective, same for both parents.
+    Dad owes Mom  = Mom's share of what Dad paid  (mom's share of Dad's expenses)
+    Mom owes Dad  = Dad's share of what Mom paid  (dad's share of Mom's expenses)
     """
-    i_owe, owed_to_me = 0.0, 0.0
+    dad_owes_mom = 0.0
+    mom_owes_dad = 0.0
 
     for _, row in df.iterrows():
         if str(row.get("status", "")).lower() in ("settled",):
@@ -137,14 +133,22 @@ def calc_balances(df: pd.DataFrame, identity: str) -> tuple[float, float]:
             continue
 
         if p == "me":
-            # The viewer logged this expense → viewer paid → co-parent owes viewer's share
-            owed_to_me += amt * (1 - split)
+            # Person who logged it paid → they are owed by the co-parent
+            # identity='me' = Dad logged it → Dad is owed by Mom
+            # identity='mom' = Mom logged it → Mom is owed by Dad
+            if identity == "me":
+                mom_owes_dad += amt * (1 - split)   # Mom owes Dad her share of Dad's expense
+            else:
+                dad_owes_mom += amt * (1 - split)   # Dad owes Mom her share of Mom's expense
 
         elif p == "other":
-            # Co-parent paid → viewer owes co-parent's share
-            i_owe += amt * split
+            # Co-parent paid → viewer owes their share
+            if identity == "me":
+                dad_owes_mom += amt * split   # Dad owes Mom his share of Mom's expense
+            else:
+                mom_owes_dad += amt * split   # Mom owes Dad her share of Dad's expense
 
-    return round(i_owe, 2), round(owed_to_me, 2)
+    return round(dad_owes_mom, 2), round(mom_owes_dad, 2)
 
 CATEGORIES = [
     "Groceries", "Kids", "Medical", "Transportation",
@@ -291,34 +295,26 @@ except Exception as e:
 
 # ── Balance cards ──
 if not df.empty:
-    i_owe, owed_to_me = calc_balances(df, identity)
-    net = owed_to_me - i_owe
+    dad_owes_mom, mom_owes_dad = calc_balances(df)
 else:
-    i_owe, owed_to_me, net = 0.0, 0.0, 0.0
+    dad_owes_mom, mom_owes_dad = 0.0, 0.0
 
-# ── Balance cards ──
-# "You owe" = what the current viewer owes the co-parent
-# "Owed to you" = what the co-parent owes the current viewer
-c1, c2, c3 = st.columns(3)
+# ── Balance cards — always from the SAME fixed perspective for both parents ──
+# dad_owes_mom  = what DAD owes MOM  (Dad's perspective: this is what YOU owe)
+# mom_owes_dad  = what MOM owes DAD  (Dad's perspective: this is what THEY owe you)
+c1, c2 = st.columns(2)
 with c1:
-    if i_owe > 0.01:
-        st.error(f"**You owe**  \n**${i_owe:,.2f}**")
+    if dad_owes_mom > 0.01:
+        st.error(f"**👤 Dad owes Mom**  \n**${dad_owes_mom:,.2f}**")
     else:
-        st.success(f"**You owe**  \n**$0.00**")
+        st.success(f"**👤 Dad owes Mom**  \n**$0.00**")
 with c2:
-    if owed_to_me > 0.01:
-        st.success(f"**Owed to you**  \n**${owed_to_me:,.2f}**")
+    if mom_owes_dad > 0.01:
+        st.success(f"**👤 Mom owes Dad**  \n**${mom_owes_dad:,.2f}**")
     else:
-        st.info(f"**Owed to you**  \n**$0.00**")
-with c3:
-    if net > 0.05:
-        st.metric("Net", f"+${net:,.2f}", delta="You're owed")
-    elif net < -0.05:
-        st.metric("Net", f"-${abs(net):,.2f}", delta="You owe", delta_color="inverse")
-    else:
-        st.metric("Net", "$0.00", delta="All settled")
+        st.info(f"**👤 Mom owes Dad**  \n**$0.00**")
 
-st.caption(f"Logged in as **{my_name}** · **{other_name}** is the co-parent")
+st.caption(f"Logged in as **{my_name}** · Both parents see the same numbers")
 
 st.divider()
 
@@ -611,7 +607,7 @@ if not df.empty:
             df[debug_cols] if all(c in df.columns for c in debug_cols) else df,
             use_container_width=True, hide_index=True,
         )
-        st.markdown(f"**Result:** `i_owe={i_owe}`, `owed_to_me={owed_to_me}`, **net={net:+.2f}**")
+        st.markdown(f"**Result:** `dad_owes_mom={dad_owes_mom}`, `mom_owes_dad={mom_owes_dad}`")
 
 # ── Switch parent ──
 st.divider()
