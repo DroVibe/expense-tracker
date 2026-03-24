@@ -156,6 +156,19 @@ CATEGORIES = [
 supabase = get_supabase()
 _is_configured = supabase is not None
 
+# ─── MIGRATION: convert legacy "Me"/"Other" stored values to actual names ──────
+# Runs once on every app load until all rows are migrated.
+if _is_configured:
+    try:
+        rows = supabase.table("expenses").select("id,paid_by").execute().data or []
+        for r in rows:
+            old = str(r.get("paid_by") or "").strip()
+            if old.lower() in ("me", "other"):
+                new_val = "Mom" if old.lower() == "other" else "Dad"
+                supabase.table("expenses").update({"paid_by": new_val}).eq("id", r["id"]).execute()
+    except Exception:
+        pass  # Non-fatal — balance will just be off until migration runs
+
 def render_setup_warning():
     st.title("🧾 Co-Parent Expense Tracker")
     st.divider()
