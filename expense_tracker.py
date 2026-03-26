@@ -1,163 +1,55 @@
 """
-Co-Parent Expense Tracker — Dashboard Page
-Balances, quick add, and settle up.
+Co-Parent Expense Tracker — Dashboard
+Balances, quick-add, settle up, and monthly summary.
 """
 
 import streamlit as st
 import pandas as pd
 from datetime import date
-from supabase import create_client, Client
-import uuid
 
-st.set_page_config(page_title="Expense Tracker — Dashboard", page_icon="🧾", layout="centered")
+from shared import (
+    get_supabase, get_names, show_identity_picker, show_profile_switcher,
+    CATEGORIES, load_expenses, insert_expense, update_expense,
+    upload_receipt, calc_balances, payer_share,
+)
+
+st.set_page_config(
+    page_title="Expense Tracker — Dashboard",
+    page_icon="🧾",
+    layout="centered",
+)
 
 # ─── SESSION STATE ────────────────────────────────────────────────────────────
 
 if "identity" not in st.session_state:
     st.session_state["identity"] = None
 
-# ─── SUPABASE CLIENT ──────────────────────────────────────────────────────────
-
-@st.cache_resource
-def get_supabase() -> Client | None:
-    try:
-        url = st.secrets.get("SUPABASE_URL")
-        key = st.secrets.get("SUPABASE_KEY")
-    except Exception:
-        return None
-    if not url or not key or url == "your_url_here":
-        return None
-    try:
-        return create_client(url, key)
-    except Exception:
-        return None
-
-# ─── STORAGE HELPERS ──────────────────────────────────────────────────────────
-
-BUCKET = "receipts"
-
-def upload_receipt(supabase: Client, file_bytes: bytes, filename: str) -> str | None:
-    ext = filename.split(".")[-1].lower() if "." in filename else "jpg"
-    path = f"{uuid.uuid4().hex}.{ext.replace(' ', '_')}"
-    try:
-        mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
-                "pdf": "application/pdf", "gif": "image/gif"}.get(ext, "application/octet-stream")
-        supabase.storage.from_(BUCKET).upload(path, file_bytes, file_options={"content-type": mime})
-        return supabase.storage.from_(BUCKET).get_public_url(path)
-    except Exception:
-        return None
-
-def delete_receipt(supabase: Client, url: str) -> None:
-    if not url:
-        return
-    fname = url.split("/")[-1].split("?")[0]
-    if fname:
-        try:
-            supabase.storage.from_(BUCKET).remove(fname)
-        except Exception:
-            pass
-
-# ─── DATA OPS ─────────────────────────────────────────────────────────────────
-
-def load_expenses(supabase: Client) -> pd.DataFrame:
-    result = supabase.table("expenses").select("*").order("date", desc=True).execute()
-    df = pd.DataFrame(result.data or [])
-    if df.empty:
-        df["date"] = pd.Series(dtype="datetime64[ns]")
-        df["amount"] = pd.Series(dtype=float)
-        df["split_pct"] = pd.Series(dtype=float)
-        return df
-    df["date"]      = pd.to_datetime(df["date"], errors="coerce")
-    df["amount"]    = pd.to_numeric(df["amount"], errors="coerce").fillna(0).round(2)
-    df["split_pct"] = pd.to_numeric(df["split_pct"], errors="coerce").fillna(50)
-    return df
-
-def insert_expense(supabase: Client, row: dict) -> None:
-    supabase.table("expenses").insert(row).execute()
-
-def update_expense(supabase: Client, expense_id: int, row: dict) -> None:
-    supabase.table("expenses").update(row).eq("id", expense_id).execute()
-
-def delete_expense(supabase: Client, expense_id: int) -> None:
-    supabase.table("expenses").delete().eq("id", expense_id).execute()
-
-# ─── HELPERS ─────────────────────────────────────────────────────────────────
-
-def identity_name(viewer: str, role: str) -> str:
-    return "Dad" if viewer == "me" else "Mom" if role == "Me" else "Dad"
-
-CATEGORIES = [
-    "Groceries", "Kids", "Medical", "Transportation",
-    "Entertainment", "Clothing", "School", "Other"
-]
-
-def calc_balances(df: pd.DataFrame) -> tuple[float, float]:
-    dad_owes_mom, mom_owes_dad = 0.0, 0.0
-    for _, row in df.iterrows():
-        if str(row.get("status", "")).lower() == "settled":
-            continue
-        amt   = float(row.get("amount", 0))
-        split = float(row.get("split_pct", 50)) / 100.0
-        p     = str(row.get("paid_by", "")).strip()
-        if p.lower() == "both":
-            continue
-        if p == "Dad":
-            mom_owes_dad += amt * (1 - split)
-        elif p == "Mom":
-            dad_owes_mom += amt * (1 - split)
-    return round(dad_owes_mom, 2), round(mom_owes_dad, 2)
-
-# ─── MIGRATION ────────────────────────────────────────────────────────────────
+# ─── SUPABASE CHECK ──────────────────────────────────────────────────────────
 
 supabase = get_supabase()
-if supabase is not None:
-    try:
-        rows = supabase.table("expenses").select("id,paid_by").execute().data or []
-        for r in rows:
-            old = str(r.get("paid_by") or "").strip()
-            if old.lower() in ("me", "other"):
-                new_val = "Mom" if old.lower() == "other" else "Dad"
-                supabase.table("expenses").update({"paid_by": new_val}).eq("id", r["id"]).execute()
-    except Exception:
-        pass
 
-_is_configured = supabase is not None
-
-# ─── SETUP GATE ───────────────────────────────────────────────────────────────
-
-if not _is_configured:
-    st.title("🧾 Co-Parent Expense Tracker")
+if supabase is None:
+    st.title("Co-Parent Expense Tracker")
     st.divider()
-    st.error("⚠️ Supabase is not configured.")
-    st.markdown("### 🔧 Setup Required")
-    st.markdown("Add your secrets in **Streamlit Cloud → Settings → Secrets**:\n\n"
-                "```\nSUPABASE_URL = \"https://xxxx.supabase.co\"\nSUPABASE_KEY = \"eyJ...\"\n```\n\n"
-                "Then run the SQL setup from the app repository's README.")
+    st.error("Supabase is not configured.")
+    st.markdown(
+        "### Setup Required\n\n"
+        "Add your secrets in **Streamlit Cloud -> Settings -> Secrets**:\n\n"
+        "```\n"
+        'SUPABASE_URL = "https://xxxx.supabase.co"\n'
+        'SUPABASE_KEY = "eyJ..."\n'
+        "```\n\n"
+        "Then create the `expenses` table (see README)."
+    )
     st.stop()
 
-# ─── IDENTITY ────────────────────────────────────────────────────────────────
+# ─── IDENTITY GATE ───────────────────────────────────────────────────────────
 
 if st.session_state["identity"] is None:
-    st.title("🧾 Co-Parent Expense Tracker")
-    st.markdown("##### Track, split, and settle expenses together — in real time.")
-    st.divider()
-    st.markdown("### 👋 Who's viewing?")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**👤 Me / Dad**")
-        if st.button("Continue as Me (Dad)", use_container_width=True):
-            st.session_state["identity"] = "me"
-            st.rerun()
-    with c2:
-        st.markdown("**👤 Mom**")
-        if st.button("Continue as Mom", use_container_width=True):
-            st.session_state["identity"] = "mom"
-            st.rerun()
-    st.stop()
+    show_identity_picker()
 
-identity   = st.session_state["identity"]
-my_name    = identity_name(identity, "Me")
-other_name = identity_name(identity, "Other")
+identity = st.session_state["identity"]
+my_name, other_name = get_names(identity)
 
 # ─── LOAD DATA ────────────────────────────────────────────────────────────────
 
@@ -168,34 +60,46 @@ except Exception:
 
 # ─── PAGE HEADER ──────────────────────────────────────────────────────────────
 
-st.title("🧾 Expense Tracker")
+st.title("Expense Tracker")
+
 col_nav, col_refresh = st.columns([4, 1])
 with col_nav:
-    st.page_link("pages/2_Records.py", label="📋 View All Records →", use_container_width=True)
+    st.page_link(
+        "pages/2_Records.py",
+        label="View All Records ->",
+        use_container_width=True,
+    )
 with col_refresh:
-    if st.button("🔄 Refresh", use_container_width=True):
-        st.cache_data.clear()
+    if st.button("Refresh", use_container_width=True):
         st.rerun()
 
-st.caption(f"Logged in as **{my_name}** · Both parents share the same live data")
+st.caption(f"Logged in as **{my_name}** — both parents share the same live data")
 st.divider()
 
 # ─── BALANCE CARDS ───────────────────────────────────────────────────────────
+# split_pct is always "Dad's share %". The balance math is in shared.py.
 
 if not df.empty:
     dad_owes_mom, mom_owes_dad = calc_balances(df)
 else:
     dad_owes_mom, mom_owes_dad = 0.0, 0.0
 
-c1, c2 = st.columns(2)
+net = dad_owes_mom - mom_owes_dad
+
+c1, c2, c3 = st.columns(3)
 with c1:
-    (st.error if dad_owes_mom > 0.01 else st.success)(
-        f"**👤 Dad owes Mom**\n**${dad_owes_mom:,.2f}**"
-    )
+    color = st.error if dad_owes_mom > 0.01 else st.success
+    color(f"**Dad owes Mom**\n**${dad_owes_mom:,.2f}**")
 with c2:
-    (st.success if mom_owes_dad > 0.01 else st.info)(
-        f"**👤 Mom owes Dad**\n**${mom_owes_dad:,.2f}**"
-    )
+    color = st.error if mom_owes_dad > 0.01 else st.success
+    color(f"**Mom owes Dad**\n**${mom_owes_dad:,.2f}**")
+with c3:
+    if net > 0.01:
+        st.warning(f"**Net: Dad owes Mom**\n**${abs(net):,.2f}**")
+    elif net < -0.01:
+        st.warning(f"**Net: Mom owes Dad**\n**${abs(net):,.2f}**")
+    else:
+        st.success("**All settled up!**\n**$0.00**")
 
 st.divider()
 
@@ -203,57 +107,90 @@ st.divider()
 #  ADD EXPENSE
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.subheader("➕ Add Expense")
+st.subheader("Add Expense")
 
-with st.expander("✏️ Log a new expense", expanded=True):
+with st.expander("Log a new expense", expanded=False):
     with st.form("add_form", clear_on_submit=True):
-        paid_by = st.radio(
-            "Who paid?",
-            ["Me", "Other", "Both"],
-            horizontal=True,
-            help="Me = you. Other = co-parent."
-        )
-        date_in = st.date_input("Date", value=date.today())
-        desc    = st.text_input("Description *", placeholder="e.g. Groceries at Publix")
-        cat     = st.selectbox("Category", CATEGORIES)
-        amt     = st.number_input("Amount ($) *", min_value=0.01, step=0.01, format="%.2f")
-        split   = st.slider(f"{my_name}'s split %", 0, 100, 50, step=5)
-        status  = st.selectbox("Status", ["active", "settled"])
-        notes   = st.text_input("Notes (optional)")
-        receipt = st.file_uploader("🧾 Receipt (optional)", type=["jpg", "jpeg", "png", "pdf"])
+        col_pay, col_date = st.columns(2)
+        with col_pay:
+            paid_by = st.radio(
+                "Who paid?",
+                ["Dad", "Mom", "Both"],
+                horizontal=True,
+                help="Select who actually paid for this expense.",
+            )
+        with col_date:
+            date_in = st.date_input("Date", value=date.today())
 
-        submitted = st.form_submit_button("💾 Save Expense", use_container_width=True)
+        desc = st.text_input(
+            "Description *", placeholder="e.g. Groceries at Publix",
+        )
+
+        col_cat, col_amt = st.columns(2)
+        with col_cat:
+            cat = st.selectbox("Category", CATEGORIES)
+        with col_amt:
+            amt = st.number_input(
+                "Amount ($) *", min_value=0.01, step=0.01, format="%.2f",
+            )
+
+        split = st.slider(
+            "Dad's share %",
+            0, 100, 50, step=5,
+            help="How much of this expense is Dad's responsibility. The rest is Mom's.",
+        )
+
+        # Show live preview of the split
+        if amt > 0:
+            dad_s = round(amt * split / 100, 2)
+            mom_s = round(amt - dad_s, 2)
+            st.caption(f"Dad pays **${dad_s:.2f}** · Mom pays **${mom_s:.2f}**")
+
+        col_status, col_notes = st.columns(2)
+        with col_status:
+            status = st.selectbox("Status", ["active", "settled"])
+        with col_notes:
+            notes = st.text_input("Notes (optional)")
+
+        receipt = st.file_uploader(
+            "Receipt (optional)", type=["jpg", "jpeg", "png", "pdf"],
+        )
+
+        submitted = st.form_submit_button(
+            "Save Expense", use_container_width=True,
+        )
 
     if submitted:
         if not desc.strip():
-            st.warning("⚠️ Description is required.")
+            st.warning("Description is required.")
         elif amt <= 0:
-            st.warning("⚠️ Amount must be greater than $0.")
+            st.warning("Amount must be greater than $0.")
         else:
             row = {
-                "date": str(date_in), "description": desc.strip(),
-                "category": cat, "amount": round(float(amt), 2),
-                "paid_by": paid_by, "split_pct": float(split),
-                "status": status, "notes": notes.strip() or None,
+                "date": str(date_in),
+                "description": desc.strip(),
+                "category": cat,
+                "amount": round(float(amt), 2),
+                "paid_by": paid_by,
+                "split_pct": float(split),
+                "status": status,
+                "notes": notes.strip() or None,
             }
-            if row["paid_by"] == "Me":
-                row["paid_by"] = my_name
-            elif row["paid_by"] == "Other":
-                row["paid_by"] = other_name
             if receipt:
                 try:
-                    url = upload_receipt(supabase, receipt.getvalue(), receipt.name)
+                    url = upload_receipt(
+                        supabase, receipt.getvalue(), receipt.name,
+                    )
                     if url:
                         row["receipt_url"] = url
                 except Exception:
-                    st.warning("⚠️ Receipt upload failed.")
+                    st.warning("Receipt upload failed — expense saved without it.")
             try:
                 insert_expense(supabase, row)
-                st.success("✅ Expense saved!")
-                st.cache_data.clear()
+                st.success("Expense saved!")
                 st.rerun()
             except Exception as e:
-                st.error(f"❌ Save failed: {e}")
+                st.error(f"Save failed: {e}")
 
 st.divider()
 
@@ -264,58 +201,70 @@ st.divider()
 if not df.empty:
     active = df[df["status"].str.lower() != "settled"].copy()
     if not active.empty:
-        st.subheader("💸 Settle Up")
-        st.markdown("Click **Settle** when a parent has paid their share. Removes from active balances.")
-        for _, r in active.iterrows():
+        st.subheader("Settle Up")
+        st.markdown(
+            "Mark an expense **settled** when the owing parent has paid their share.",
+        )
+
+        # Show at most 20 active items; link to Records for the rest.
+        show_active = active.head(20)
+
+        for _, r in show_active.iterrows():
             amt   = float(r["amount"])
             split = float(r.get("split_pct", 50))
-            your_share = round(amt * split / 100, 2)
-            their_share = round(amt * (100 - split) / 100, 2)
+            payer = str(r.get("paid_by", "?"))
+            dad_s, mom_s = payer_share(amt, split, payer)
+
             with st.container():
                 cols, colb = st.columns([4, 1])
                 with cols:
                     st.markdown(
                         f"**#{r['id']}** — {r['description']}  "
-                        f"| **${amt:.2f}** | Split: **{split:.0f}%**"
+                        f"| **${amt:.2f}** | Paid by **{payer}**",
                     )
                     st.caption(
-                        f"{my_name} pays: **${your_share:.2f}**  ·  "
-                        f"{other_name} pays: **${their_share:.2f}**"
+                        f"Dad: **${dad_s:.2f}** · Mom: **${mom_s:.2f}**",
                     )
                 with colb:
-                    if st.button(f"✅ Settle", key=f"settle_dash_{r['id']}", use_container_width=True):
+                    if st.button(
+                        "Settle",
+                        key=f"settle_dash_{r['id']}",
+                        use_container_width=True,
+                    ):
                         try:
-                            update_expense(supabase, int(r["id"]), {"status": "settled"})
-                            st.cache_data.clear()
+                            update_expense(
+                                supabase, int(r["id"]), {"status": "settled"},
+                            )
                             st.rerun()
                         except Exception as e:
-                            st.error(f"❌ {e}")
+                            st.error(f"Error: {e}")
                 st.divider()
 
-# ── Monthly summary ──
+        if len(active) > 20:
+            st.info(
+                f"{len(active) - 20} more active expenses. "
+                "Open **Records** to see all.",
+            )
+
+# ── Monthly Summary ──────────────────────────────────────────────────────────
+
 if not df.empty:
-    st.divider()
-    st.subheader("📅 Monthly Spending")
+    st.subheader("Monthly Spending")
     monthly = (
         df.groupby(df["date"].dt.to_period("M"))["amount"]
-        .sum().reset_index()
+        .sum()
+        .reset_index()
     )
     if not monthly.empty:
-        monthly["date"] = monthly["date"].astype(str).sort_values(ascending=False)
         monthly.columns = ["Month", "Total ($)"]
-        st.dataframe(monthly, use_container_width=True, hide_index=True)
+        monthly["Month"] = monthly["Month"].astype(str)
+        monthly = monthly.sort_values("Month", ascending=False)
+        st.bar_chart(monthly.set_index("Month"), y="Total ($)")
+        with st.expander("View table"):
+            st.dataframe(monthly, use_container_width=True, hide_index=True)
 
-# ─── Profile switcher ──
-current = "👤 Dad" if identity == "me" else "👤 Mom"
-with st.container():
-    col_si, col_so = st.columns([1, 1])
-    with col_si:
-        st.markdown(f"**Profile:** {current}")
-    with col_so:
-        new_identity = "mom" if identity == "me" else "me"
-        new_label = "👤 Switch to Mom" if identity == "me" else "👤 Switch to Dad"
-        if st.button(new_label, use_container_width=True):
-            st.session_state["identity"] = new_identity
-            st.rerun()
+# ─── Footer ──────────────────────────────────────────────────────────────────
 
-st.caption("Built with Streamlit · Data via Supabase · Both parents share the same live view")
+st.divider()
+show_profile_switcher(identity)
+st.caption("Built with Streamlit and Supabase")
