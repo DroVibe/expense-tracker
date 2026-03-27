@@ -239,9 +239,10 @@ if not df.empty:
                 if st.session_state.get(f"settle_expand_{r['id']}"):
                     with st.expander(f"📋 Settle Expense #{r['id']} — upload proof", expanded=True):
                         with st.form(f"settle_form_{r['id']}", clear_on_submit=True):
+                            owed = dad_s if payer == "Mom" else mom_s
+                            owing_to = "Dad" if payer == "Mom" else "Mom"
                             st.markdown(
-                                f"**{payer}** pays **{owed := (dad_s if payer == 'Mom' else mom_s):.2f}** "
-                                f"to **{'Dad' if payer == 'Mom' else 'Mom'}** — upload a screenshot as proof."
+                                f"**{payer}** pays **${owed:.2f}** to **{owing_to}** — upload a screenshot as proof."
                             )
 
                             proof = st.file_uploader(
