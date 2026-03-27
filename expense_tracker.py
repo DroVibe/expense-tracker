@@ -1,16 +1,17 @@
 """
 Co-Parent Expense Tracker — Dashboard
-Balances, quick-add, settle up, and monthly summary.
+Balances, quick-add, settle up with proof upload, and monthly summary.
 """
 
 import streamlit as st
 import pandas as pd
-from datetime import date
+from datetime import date, datetime
 
 from shared import (
     get_supabase, get_names, show_identity_picker, show_profile_switcher,
     CATEGORIES, load_expenses, insert_expense, update_expense,
-    upload_receipt, calc_balances, payer_share,
+    upload_receipt, upload_settlement_proof, delete_file,
+    calc_balances, payer_share,
 )
 
 st.set_page_config(
@@ -24,7 +25,7 @@ st.set_page_config(
 if "identity" not in st.session_state:
     st.session_state["identity"] = None
 
-# ─── SUPABASE CHECK ──────────────────────────────────────────────────────────
+# ─── SUPABASE CHECK ────────────────────────────────────────────────────────────
 
 supabase = get_supabase()
 
@@ -39,11 +40,11 @@ if supabase is None:
         'SUPABASE_URL = "https://xxxx.supabase.co"\n'
         'SUPABASE_KEY = "eyJ..."\n'
         "```\n\n"
-        "Then create the `expenses` table (see README)."
+        "Then run the migration to add settlement columns (see README)."
     )
     st.stop()
 
-# ─── IDENTITY GATE ───────────────────────────────────────────────────────────
+# ─── IDENTITY GATE ────────────────────────────────────────────────────────────
 
 if st.session_state["identity"] is None:
     show_identity_picker()
@@ -76,8 +77,7 @@ with col_refresh:
 st.caption(f"Logged in as **{my_name}** — both parents share the same live data")
 st.divider()
 
-# ─── BALANCE CARDS ───────────────────────────────────────────────────────────
-# split_pct is always "Dad's share %". The balance math is in shared.py.
+# ─── BALANCE CARDS ────────────────────────────────────────────────────────────
 
 if not df.empty:
     dad_owes_mom, mom_owes_dad = calc_balances(df)
@@ -140,7 +140,6 @@ with st.expander("Log a new expense", expanded=False):
             help="How much of this expense is Dad's responsibility. The rest is Mom's.",
         )
 
-        # Show live preview of the split
         if amt > 0:
             dad_s = round(amt * split / 100, 2)
             mom_s = round(amt - dad_s, 2)
@@ -178,9 +177,7 @@ with st.expander("Log a new expense", expanded=False):
             }
             if receipt:
                 try:
-                    url = upload_receipt(
-                        supabase, receipt.getvalue(), receipt.name,
-                    )
+                    url = upload_receipt(supabase, receipt.getvalue(), receipt.name)
                     if url:
                         row["receipt_url"] = url
                 except Exception:
@@ -195,7 +192,7 @@ with st.expander("Log a new expense", expanded=False):
 st.divider()
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SETTLE UP
+#  SETTLE UP  (with settlement proof upload)
 # ══════════════════════════════════════════════════════════════════════════════
 
 if not df.empty:
@@ -203,10 +200,10 @@ if not df.empty:
     if not active.empty:
         st.subheader("Settle Up")
         st.markdown(
-            "Mark an expense **settled** when the owing parent has paid their share.",
+            "To settle an expense, upload a screenshot of your payment "
+            "(Venmo, PayPal, Zelle, bank transfer, etc.).",
         )
 
-        # Show at most 20 active items; link to Records for the rest.
         show_active = active.head(20)
 
         for _, r in show_active.iterrows():
@@ -215,29 +212,91 @@ if not df.empty:
             payer = str(r.get("paid_by", "?"))
             dad_s, mom_s = payer_share(amt, split, payer)
 
+            # Who owes whom?
+            owing = ""
+            if payer == "Dad":
+                owing = f"Mom owes Dad ${round(amt * (1 - split/100), 2):.2f}"
+            elif payer == "Mom":
+                owing = f"Dad owes Mom ${round(amt * split/100, 2):.2f}"
+
             with st.container():
-                cols, colb = st.columns([4, 1])
-                with cols:
+                col_info, col_btn = st.columns([5, 1])
+                with col_info:
                     st.markdown(
                         f"**#{r['id']}** — {r['description']}  "
-                        f"| **${amt:.2f}** | Paid by **{payer}**",
+                        f"| **${amt:.2f}** | {payer} paid",
                     )
-                    st.caption(
-                        f"Dad: **${dad_s:.2f}** · Mom: **${mom_s:.2f}**",
-                    )
-                with colb:
+                    st.caption(f"Due: {owing}")
+                with col_btn:
                     if st.button(
                         "Settle",
-                        key=f"settle_dash_{r['id']}",
+                        key=f"sbtn_{r['id']}",
                         use_container_width=True,
                     ):
-                        try:
-                            update_expense(
-                                supabase, int(r["id"]), {"status": "settled"},
+                        st.session_state[f"settle_expand_{r['id']}"] = True
+
+                # ── Settlement modal (inline expander) ──────────────────────
+                if st.session_state.get(f"settle_expand_{r['id']}"):
+                    with st.expander(f"📋 Settle Expense #{r['id']} — upload proof", expanded=True):
+                        with st.form(f"settle_form_{r['id']}", clear_on_submit=True):
+                            st.markdown(
+                                f"**{payer}** pays **{owed := (dad_s if payer == 'Mom' else mom_s):.2f}** "
+                                f"to **{'Dad' if payer == 'Mom' else 'Mom'}** — upload a screenshot as proof."
                             )
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error: {e}")
+
+                            proof = st.file_uploader(
+                                "💳 Payment screenshot (Venmo, PayPal, Zelle, etc.) *",
+                                type=["jpg", "jpeg", "png", "pdf"],
+                                key=f"proof_file_{r['id']}",
+                            )
+                            settle_note = st.text_input(
+                                "Note (optional)",
+                                placeholder="e.g. Venmo @username, $42.50",
+                                key=f"proof_note_{r['id']}",
+                            )
+
+                            col_ok, col_cancel = st.columns(2)
+                            with col_ok:
+                                submitted_settle = st.form_submit_button(
+                                    "✅ Confirm & Settle",
+                                    use_container_width=True,
+                                )
+                            with col_cancel:
+                                if st.form_submit_button(
+                                    "Cancel", use_container_width=True,
+                                ):
+                                    st.session_state[f"settle_expand_{r['id']}"] = False
+                                    st.rerun()
+
+                        if submitted_settle:
+                            if not proof:
+                                st.warning("Please upload a payment screenshot first.")
+                            else:
+                                proof_url = upload_settlement_proof(
+                                    supabase, proof.getvalue(), proof.name,
+                                )
+                                if not proof_url:
+                                    st.error("Proof upload failed. Try again.")
+                                else:
+                                    row_update = {
+                                        "status": "settled",
+                                        "settled_by": my_name,
+                                        "settled_at": datetime.utcnow().isoformat(),
+                                        "settlement_proof_url": proof_url,
+                                        "settlement_note": settle_note.strip() or None,
+                                    }
+                                    try:
+                                        update_expense(
+                                            supabase, int(r["id"]), row_update,
+                                        )
+                                        st.session_state[f"settle_expand_{r['id']}"] = False
+                                        st.success(
+                                            f"✅ Settled! Proof uploaded for #{r['id']}.",
+                                        )
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Settlement failed: {e}")
+
                 st.divider()
 
         if len(active) > 20:
@@ -246,7 +305,7 @@ if not df.empty:
                 "Open **Records** to see all.",
             )
 
-# ── Monthly Summary ──────────────────────────────────────────────────────────
+# ─── Monthly Summary ────────────────────────────────────────────────────────
 
 if not df.empty:
     st.subheader("Monthly Spending")
@@ -263,7 +322,7 @@ if not df.empty:
         with st.expander("View table"):
             st.dataframe(monthly, use_container_width=True, hide_index=True)
 
-# ─── Footer ──────────────────────────────────────────────────────────────────
+# ─── Footer ─────────────────────────────────────────────────────────────────
 
 st.divider()
 show_profile_switcher(identity)

@@ -6,6 +6,7 @@ Both pages import from here. No duplicated logic.
 import streamlit as st
 import pandas as pd
 import uuid
+from datetime import datetime
 from supabase import create_client, Client
 
 
@@ -77,7 +78,7 @@ CATEGORIES = [
 ]
 
 
-# ─── RECEIPT STORAGE ──────────────────────────────────────────────────────────
+# ─── STORAGE ──────────────────────────────────────────────────────────────────
 
 BUCKET = "receipts"
 
@@ -88,26 +89,37 @@ MIME_MAP = {
 }
 
 
-def upload_receipt(sb: Client, file_bytes: bytes, filename: str) -> str | None:
+def _upload_file(sb: Client, file_bytes: bytes, filename: str, prefix: str) -> str | None:
+    """Upload a file to Supabase Storage under the given prefix. Returns public URL or None."""
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "jpg"
-    path = f"{uuid.uuid4().hex}.{ext.replace(' ', '_')}"
+    safe_name = f"{uuid.uuid4().hex}.{ext.replace(' ', '_')}"
+    path = f"{prefix}/{safe_name}" if prefix else safe_name
     mime = MIME_MAP.get(ext, "application/octet-stream")
     try:
-        sb.storage.from_(BUCKET).upload(
-            path, file_bytes, file_options={"content-type": mime},
-        )
+        sb.storage.from_(BUCKET).upload(path, file_bytes, file_options={"content-type": mime})
         return sb.storage.from_(BUCKET).get_public_url(path)
     except Exception:
         return None
 
 
-def delete_receipt(sb: Client, url: str) -> None:
+def upload_receipt(sb: Client, file_bytes: bytes, filename: str) -> str | None:
+    """Upload a purchase receipt."""
+    return _upload_file(sb, file_bytes, filename, "receipts")
+
+
+def upload_settlement_proof(sb: Client, file_bytes: bytes, filename: str) -> str | None:
+    """Upload a settlement payment screenshot/proof."""
+    return _upload_file(sb, file_bytes, filename, "settlements")
+
+
+def delete_file(sb: Client, url: str) -> None:
+    """Delete a file from storage given its public URL."""
     if not url:
         return
     fname = url.split("/")[-1].split("?")[0]
     if fname:
         try:
-            sb.storage.from_(BUCKET).remove([fname])   # API expects a list
+            sb.storage.from_(BUCKET).remove([fname])
         except Exception:
             pass
 
@@ -118,13 +130,18 @@ def load_expenses(sb: Client) -> pd.DataFrame:
     result = sb.table("expenses").select("*").order("date", desc=True).execute()
     df = pd.DataFrame(result.data or [])
     if df.empty:
-        df["date"]      = pd.Series(dtype="datetime64[ns]")
-        df["amount"]    = pd.Series(dtype=float)
-        df["split_pct"] = pd.Series(dtype=float)
+        for col in ["date", "amount", "split_pct", "paid_by", "status",
+                    "description", "category", "notes", "receipt_url",
+                    "settlement_proof_url", "settled_by", "settled_at", "settlement_note"]:
+            df[col] = pd.Series(dtype="object")
         return df
     df["date"]      = pd.to_datetime(df["date"], errors="coerce")
     df["amount"]    = pd.to_numeric(df["amount"], errors="coerce").fillna(0).round(2)
     df["split_pct"] = pd.to_numeric(df["split_pct"], errors="coerce").fillna(50)
+    # Fill new settlement columns if missing
+    for col in ["settlement_proof_url", "settled_by", "settled_at", "settlement_note"]:
+        if col not in df.columns:
+            df[col] = None
     return df
 
 
@@ -141,36 +158,20 @@ def delete_expense(sb: Client, expense_id: int) -> None:
 
 
 # ─── BALANCE CALCULATION ─────────────────────────────────────────────────────
-#
-#  split_pct = "Dad's share %" (always, regardless of who is logged in).
-#
-#  Example: $100 expense, split_pct = 60, paid_by = "Mom"
-#    Dad's share  = $100 * 60%  = $60   → Dad owes Mom $60
-#    Mom's share  = $100 * 40%  = $40   → she paid, so nothing extra
-#
-#  Example: $100 expense, split_pct = 60, paid_by = "Dad"
-#    Mom's share  = $100 * 40%  = $40   → Mom owes Dad $40
-#    Dad's share  = $100 * 60%  = $60   → he paid, so nothing extra
-#
-# ─────────────────────────────────────────────────────────────────────────────
 
 def calc_balances(df: pd.DataFrame) -> tuple[float, float]:
     """Return (dad_owes_mom, mom_owes_dad) from all active (unsettled) rows."""
-    dad_owes_mom = 0.0
-    mom_owes_dad = 0.0
+    dad_owes_mom, mom_owes_dad = 0.0, 0.0
     for _, row in df.iterrows():
         if str(row.get("status", "")).lower() == "settled":
             continue
-        amt       = float(row.get("amount", 0))
-        dad_pct   = float(row.get("split_pct", 50)) / 100.0
-        payer     = str(row.get("paid_by", "")).strip()
+        amt     = float(row.get("amount", 0))
+        dad_pct = float(row.get("split_pct", 50)) / 100.0
+        payer   = str(row.get("paid_by", "")).strip()
         if payer == "Dad":
-            # Dad paid. Mom owes her share.
             mom_owes_dad += amt * (1 - dad_pct)
         elif payer == "Mom":
-            # Mom paid. Dad owes his share.
             dad_owes_mom += amt * dad_pct
-        # "Both" → each paid their own share, no debt.
     return round(dad_owes_mom, 2), round(mom_owes_dad, 2)
 
 

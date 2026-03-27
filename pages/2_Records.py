@@ -1,17 +1,18 @@
 """
 Co-Parent Expense Tracker — Records Page
-Full expense log with filters, search, export, inline edit/delete with confirmation.
+Full expense log with filters, search, export, inline edit/delete with confirmation,
+and settlement proof upload for settling parents.
 """
 
 import streamlit as st
 import pandas as pd
-from datetime import date
+from datetime import date, datetime
 from io import BytesIO
 
 from shared import (
     get_supabase, get_names, show_identity_picker, show_profile_switcher,
     CATEGORIES, load_expenses, update_expense, delete_expense,
-    upload_receipt, delete_receipt, payer_share,
+    upload_receipt, delete_file, upload_settlement_proof, payer_share,
 )
 
 st.set_page_config(
@@ -48,7 +49,7 @@ try:
 except Exception:
     df = pd.DataFrame()
 
-# ─── PAGE HEADER ──────────────────────────────��───────────────────────────────
+# ─── PAGE HEADER ─────────────────────────────────────────────────────────────
 
 st.title("All Records")
 st.caption(f"Logged in as **{my_name}** — {len(df)} total expenses")
@@ -78,12 +79,10 @@ min_d = df["date"].min().date()
 max_d = df["date"].max().date()
 
 with st.expander("Filters & Search", expanded=True):
-    # Text search
     search = st.text_input(
         "Search descriptions",
         placeholder="e.g. Publix, soccer, doctor...",
     )
-
     f1, f2, f3, f4, f5 = st.columns(5)
     with f1:
         start = st.date_input("From", value=min_d)
@@ -134,17 +133,17 @@ with sc2:
 with sc3:
     st.metric("Total", len(filtered), f"${filtered['amount'].sum():,.2f}")
 
-# ─── EXPORT ───────────────────────────────────────────────────────────────────
+# ─── EXPORT ──────────────────────────────────────────────────────────────────
 
 if not filtered.empty:
     export_df = filtered.copy()
     export_df["date"] = export_df["date"].dt.strftime("%Y-%m-%d")
     cols_to_export = [
-        c for c in ["id", "date", "description", "category", "amount",
-                     "paid_by", "split_pct", "status", "notes"]
-        if c in export_df.columns
+        c for c in [
+            "id", "date", "description", "category", "amount",
+            "paid_by", "split_pct", "status", "notes",
+        ] if c in export_df.columns
     ]
-
     csv_bytes = export_df[cols_to_export].to_csv(index=False).encode("utf-8")
     st.download_button(
         "Download CSV",
@@ -156,46 +155,58 @@ if not filtered.empty:
 
 st.divider()
 
-# ─── EXPENSE CARDS ────────────────────────────────────────────────────────────
+# ─── EXPENSE CARDS ───────────────────────────────────────────────────────────
 
 if filtered.empty:
     st.info("No expenses match your filters.")
 else:
     for _, r in filtered.iterrows():
-        is_active   = str(r.get("status", "")).lower() != "settled"
-        amt         = float(r["amount"])
-        split       = float(r.get("split_pct", 50))
-        payer       = str(r.get("paid_by", "?"))
-        dad_s, mom_s = payer_share(amt, split, payer)
-        receipt_url = r.get("receipt_url") or None
+        is_active      = str(r.get("status", "")).lower() != "settled"
+        amt            = float(r["amount"])
+        split          = float(r.get("split_pct", 50))
+        payer          = str(r.get("paid_by", "?"))
+        dad_s, mom_s   = payer_share(amt, split, payer)
+        receipt_url    = r.get("receipt_url") or None
+        proof_url      = r.get("settlement_proof_url") or None
+        settled_by     = r.get("settled_by") or None
+        settled_at     = r.get("settled_at") or None
+        settle_note    = r.get("settlement_note") or None
+
+        # Determine who owes on this active expense
+        if is_active:
+            if payer == "Dad":
+                owe_summary = f"Dad owes Mom **${mom_s:.2f}**"
+            elif payer == "Mom":
+                owe_summary = f"Mom owes Dad **${dad_s:.2f}**"
+            else:
+                owe_summary = "Each parent pays their share"
+        else:
+            owe_summary = None
 
         with st.container():
             # ── Card header ──
-            col_left, col_right = st.columns([3, 1])
+            col_left, col_right = st.columns([5, 1])
             with col_left:
-                status_label = "Active" if is_active else "Settled"
-                st.markdown(f"### #{r['id']} — {r['description']}")
+                label = "Active" if is_active else "Settled"
+                colour = "🟢" if is_active else "✅"
                 st.markdown(
-                    f"{status_label}  ·  **${amt:.2f}**  ·  "
+                    f"### {colour} #{r['id']} — {r['description']}\n"
+                    f"{label}  ·  **${amt:.2f}**  ·  "
                     f"Paid by **{payer}**  ·  "
                     f"Dad {split:.0f}% / Mom {100-split:.0f}%",
                 )
+                if owe_summary:
+                    st.caption(owe_summary)
             with col_right:
                 if is_active:
                     if st.button(
                         "Settle",
-                        key=f"settle_{r['id']}",
+                        key=f"sbtn_rec_{r['id']}",
                         use_container_width=True,
                     ):
-                        try:
-                            update_expense(
-                                supabase, int(r["id"]), {"status": "settled"},
-                            )
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error: {e}")
+                        st.session_state[f"settle_expand_rec_{r['id']}"] = True
                 else:
-                    st.markdown("**Settled**")
+                    st.markdown("✅ Settled")
 
             # ── Details row ──
             det1, det2, det3, det4 = st.columns(4)
@@ -215,19 +226,118 @@ else:
             if r.get("notes"):
                 st.markdown(f"**Notes:** {r['notes']}")
 
-            # ── Receipt ──
+            # ── Settlement proof banner (settled items) ──────────────────────
+            if not is_active and proof_url:
+                st.divider()
+                st.markdown("**💳 Settlement Proof**")
+                proof_col_text, proof_col_btn = st.columns([3, 1])
+                with proof_col_text:
+                    when_str = ""
+                    if settled_at:
+                        try:
+                            when_str = pd.to_datetime(settled_at).strftime("%b %d, %Y")
+                        except Exception:
+                            when_str = str(settled_at)
+                    st.markdown(
+                        f"Settled by **{settled_by or 'Unknown'}**"
+                        + (f" on {when_str}" if when_str else "")
+                        + ("." if settle_note is None else f": {settle_note}"),
+                    )
+                with proof_col_btn:
+                    st.link_button("Open Proof", proof_url, use_container_width=True)
+                ext = proof_url.rsplit(".", 1)[-1].split("?")[0].lower()
+                if ext in ("jpg", "jpeg", "png", "gif"):
+                    try:
+                        st.image(proof_url, width=400, caption="Settlement proof")
+                    except Exception:
+                        pass
+
+            # ── Receipt (active/purchase receipt) ─────────────────────────────
             if receipt_url:
                 st.divider()
-                st.markdown("**Receipt**")
+                st.markdown("**🧾 Receipt**")
                 ext = receipt_url.rsplit(".", 1)[-1].split("?")[0].lower()
                 if ext in ("jpg", "jpeg", "png", "gif"):
                     try:
-                        st.image(receipt_url, width=400, caption=f"Receipt #{r['id']}")
+                        st.image(receipt_url, width=300, caption=f"Receipt #{r['id']}")
                     except Exception:
                         st.markdown(f"[Open receipt]({receipt_url})")
                 else:
                     st.markdown(f"[Open receipt (PDF)]({receipt_url})")
                 st.link_button("Open / Download Receipt", receipt_url)
+
+            # ── Settlement upload expander (active items) ────────────────────
+            if is_active and st.session_state.get(f"settle_expand_rec_{r['id']}"):
+                st.divider()
+                with st.expander(
+                    f"📋 Settle Expense #{r['id']} — upload payment proof",
+                    expanded=True,
+                ):
+                    with st.form(f"rec_settle_{r['id']}", clear_on_submit=True):
+                        # Who owes whom + how much
+                        owing_amount = dad_s if payer == "Mom" else mom_s
+                        owing_to = "Dad" if payer == "Mom" else "Mom"
+                        owing_parent = my_name if my_name != payer else other_name
+
+                        st.markdown(
+                            f"**{owing_parent}** pays **{owing_amount:.2f}** to "
+                            f"**{owing_to}**. Upload a payment screenshot to settle.",
+                        )
+
+                        proof = st.file_uploader(
+                            "💳 Payment screenshot (Venmo, PayPal, Zelle, etc.) *",
+                            type=["jpg", "jpeg", "png", "pdf"],
+                            key=f"rec_proof_{r['id']}",
+                        )
+                        s_note = st.text_input(
+                            "Note (optional)",
+                            placeholder="e.g. Venmo @username, $42.50",
+                            key=f"rec_note_{r['id']}",
+                        )
+
+                        col_ok, col_cancel = st.columns(2)
+                        with col_ok:
+                            done = st.form_submit_button(
+                                "✅ Confirm & Settle",
+                                use_container_width=True,
+                            )
+                        with col_cancel:
+                            if st.form_submit_button("Cancel", use_container_width=True):
+                                st.session_state.pop(f"settle_expand_rec_{r['id']}", None)
+                                st.rerun()
+
+                        if done:
+                            if not proof:
+                                st.warning("Please upload a payment screenshot first.")
+                            else:
+                                proof_url_up = upload_settlement_proof(
+                                    supabase,
+                                    proof.getvalue(),
+                                    proof.name,
+                                )
+                                if not proof_url_up:
+                                    st.error("Proof upload failed. Try again.")
+                                else:
+                                    try:
+                                        update_expense(
+                                            supabase, int(r["id"]),
+                                            {
+                                                "status": "settled",
+                                                "settled_by": my_name,
+                                                "settled_at": datetime.utcnow().isoformat(),
+                                                "settlement_proof_url": proof_url_up,
+                                                "settlement_note": s_note.strip() or None,
+                                            },
+                                        )
+                                        st.session_state.pop(
+                                            f"settle_expand_rec_{r['id']}", None,
+                                        )
+                                        st.success(
+                                            f"✅ Settled! Proof uploaded for #{r['id']}.",
+                                        )
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Settlement failed: {e}")
 
             # ── Edit / Delete ──
             with st.expander(f"Edit or Delete expense #{r['id']}"):
@@ -245,7 +355,6 @@ else:
                         value=str(r.get("description", "") or ""),
                         key=f"e_desc_{r['id']}",
                     )
-
                     col_ec, col_ea = st.columns(2)
                     with col_ec:
                         e_cat = st.selectbox(
@@ -263,7 +372,6 @@ else:
                             min_value=0.01, step=0.01, format="%.2f",
                             key=f"e_amt_{r['id']}",
                         )
-
                     e_payer = st.radio(
                         "Who paid?",
                         ["Dad", "Mom", "Both"],
@@ -277,16 +385,10 @@ else:
                         0, 100, int(split), step=5,
                         key=f"e_split_{r['id']}",
                     )
-
-                    # Live preview of the edit split
                     if e_amt > 0:
                         preview_dad = round(float(e_amt) * e_split / 100, 2)
                         preview_mom = round(float(e_amt) - preview_dad, 2)
-                        st.caption(
-                            f"Dad: **${preview_dad:.2f}** · "
-                            f"Mom: **${preview_mom:.2f}**",
-                        )
-
+                        st.caption(f"Dad: **${preview_dad:.2f}** · Mom: **${preview_mom:.2f}**")
                     col_es, col_en = st.columns(2)
                     with col_es:
                         e_stat = st.selectbox(
@@ -305,9 +407,13 @@ else:
                             key=f"e_notes_{r['id']}",
                         )
 
+                    # Show current receipts / proof if present
                     if receipt_url:
-                        st.markdown("**Current receipt:**")
-                        st.link_button("View Current Receipt", receipt_url)
+                        st.markdown("**Current purchase receipt:**")
+                        st.link_button("View Receipt", receipt_url)
+                    if proof_url:
+                        st.markdown("**Current settlement proof:**")
+                        st.link_button("View Proof", proof_url)
                     e_receipt = st.file_uploader(
                         "Replace receipt (leave empty to keep current)",
                         type=["jpg", "jpeg", "png", "pdf"],
@@ -316,15 +422,12 @@ else:
 
                     eu, ed = st.columns(2)
                     with eu:
-                        upd = st.form_submit_button(
-                            "Update", use_container_width=True,
-                        )
+                        upd = st.form_submit_button("Update", use_container_width=True)
                     with ed:
                         del_ = st.form_submit_button(
                             "Delete", use_container_width=True, type="primary",
                         )
 
-                    # ── Handle Update ──
                     if upd:
                         if not e_desc.strip():
                             st.warning("Description cannot be empty.")
@@ -350,7 +453,7 @@ else:
                                     )
                                     if new_url:
                                         if receipt_url:
-                                            delete_receipt(supabase, receipt_url)
+                                            delete_file(supabase, receipt_url)
                                         new_row["receipt_url"] = new_url
                                 except Exception:
                                     st.warning("Receipt upload failed.")
@@ -361,15 +464,13 @@ else:
                             except Exception as e:
                                 st.error(f"Update failed: {e}")
 
-                    # ── Handle Delete (with confirmation) ──
                     if del_:
                         st.session_state[f"confirm_delete_{r['id']}"] = True
 
-                # Confirmation prompt lives outside the form
                 if st.session_state.get(f"confirm_delete_{r['id']}"):
                     st.warning(
-                        f"Are you sure you want to permanently delete "
-                        f"**#{r['id']} — {r['description']}** (${amt:.2f})?",
+                        f"Permanently delete **#{r['id']} — {r['description']}** "
+                        f"(${amt:.2f})?",
                     )
                     c_yes, c_no = st.columns(2)
                     with c_yes:
@@ -381,11 +482,11 @@ else:
                         ):
                             try:
                                 if receipt_url:
-                                    delete_receipt(supabase, receipt_url)
+                                    delete_file(supabase, receipt_url)
+                                if proof_url:
+                                    delete_file(supabase, proof_url)
                                 delete_expense(supabase, int(r["id"]))
-                                st.session_state.pop(
-                                    f"confirm_delete_{r['id']}", None,
-                                )
+                                st.session_state.pop(f"confirm_delete_{r['id']}", None)
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Delete failed: {e}")
@@ -395,9 +496,7 @@ else:
                             key=f"confirm_no_{r['id']}",
                             use_container_width=True,
                         ):
-                            st.session_state.pop(
-                                f"confirm_delete_{r['id']}", None,
-                            )
+                            st.session_state.pop(f"confirm_delete_{r['id']}", None)
                             st.rerun()
 
             st.divider()
