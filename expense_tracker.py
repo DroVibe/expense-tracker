@@ -15,9 +15,21 @@ from shared import (
 )
 
 st.set_page_config(
-    page_title="Expense Tracker — Dashboard",
-    page_icon="🧾",
+    page_title="Co-Parent Expense Tracker",
+    page_icon="🛡️",
     layout="centered",
+    initial_sidebar_state="collapsed",
+)
+
+# Custom manifest + PWA meta tags for Add-to-Home-Screen on iOS/Android
+st.markdown(
+    """
+    <link rel="manifest" href="manifest.json">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="Expense Tracker">
+    <meta name="theme-color" content="#0A84FF">
+    """,
+    unsafe_allow_html=True,
 )
 
 # ─── SESSION STATE ────────────────────────────────────────────────────────────
