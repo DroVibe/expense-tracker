@@ -85,6 +85,7 @@ cp .streamlit/secrets.toml.example .streamlit/secrets.toml
 | `SUPABASE_URL` | Your Supabase project URL |
 | `SUPABASE_KEY` | Your Supabase anon public key |
 | `APP_PIN` | A shared PIN both parents use to unlock the app |
+**Important:** Set APP_PIN to a real value before deploying. Leave it blank locally to test.
 
 ### 3. Install & Run
 
@@ -97,7 +98,7 @@ streamlit run expense_tracker.py
 
 1. Push this repo to GitHub
 2. Connect the repo to [Streamlit Cloud](https://streamlit.io/cloud)
-3. In **Settings → Secrets**, add all three secrets (`SUPABASE_URL`, `SUPABASE_KEY`, `APP_PIN`)
+3. In **Settings → Secrets**, add all three secrets (`SUPABASE_URL`, `SUPABASE_KEY`, `APP_PIN`) — **set APP_PIN to a real value before deploying**
 4. Deploy — the app is now accessible only via the shared PIN
 
 ---
