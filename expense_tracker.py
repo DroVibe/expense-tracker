@@ -24,14 +24,25 @@ st.set_page_config(
 
 
 # PWA / Add-to-Home-Screen meta tags
+_icon_url = "https://yniabqpsbubnzgdhbkpo.supabase.co/storage/v1/object/public/receipts/expense%20logo.webp"
+_manifest_data = {
+    "name": "Co-Parent Expense Tracker",
+    "short_name": "Expenses",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#0f172a",
+    "theme_color": "#0A84FF",
+    "orientation": "portrait",
+    "icons": [{"src": _icon_url, "sizes": "any", "type": "image/webp"}],
+}
+import json, urllib.parse
+_manifest_url = "data:application/json;utf-8," + urllib.parse.quote(json.dumps(_manifest_data))
 st.html(
-    "<link rel=\"manifest\" href=" + ""data:application/json;utf-8,%7B%22name%22%3A%22Co-Parent%20Expense%20Tracker%22%2C%22short_name%22%3A%22Expenses%22%2C%22start_url%22%3A%22/%22%2C%22display%22%3A%22standalone%22%2C%22background_color%22%3A%22%230f172a%22%2C%22theme_color%22%3A%22%230A84FF%22%2C%22orientation%22%3A%22portrait%22%2C%22icons%22%3A%5B%7B%22src%22%3A%22https%3A//yniabqpsbubnzgdhbkpo.supabase.co/storage/v1/object/public/receipts/expense%2520logo.webp%22%2C%22sizes%22%3A%22any%22%2C%22type%22%3A%22image/webp%22%7D%5D%7D"" + ">"
-    "<link rel=\"apple-touch-icon\" href=" + ""https://yniabqpsbubnzgdhbkpo.supabase.co/storage/v1/object/public/receipts/expense%20logo.webp"" + ">"
+    f"<link rel=\"manifest\" href=\"{_manifest_url}\">"
+    f"<link rel=\"apple-touch-icon\" href=\"{_icon_url}\">"
     "<meta name=\"apple-mobile-web-app-capable\" content=\"yes\">"
     "<meta name=\"apple-mobile-web-app-title\" content=\"Co-Parent Expense Tracker\">"
-    "<meta name=\"theme-color\" content=\"#0A84FF\">",
-    manifest="data:application/json;utf-8,%7B%22name%22%3A%22Co-Parent%20Expense%20Tracker%22%2C%22short_name%22%3A%22Expenses%22%2C%22start_url%22%3A%22/%22%2C%22display%22%3A%22standalone%22%2C%22background_color%22%3A%22%230f172a%22%2C%22theme_color%22%3A%22%230A84FF%22%2C%22orientation%22%3A%22portrait%22%2C%22icons%22%3A%5B%7B%22src%22%3A%22https%3A//yniabqpsbubnzgdhbkpo.supabase.co/storage/v1/object/public/receipts/expense%2520logo.webp%22%2C%22sizes%22%3A%22any%22%2C%22type%22%3A%22image/webp%22%7D%5D%7D",
-    icon="https://yniabqpsbubnzgdhbkpo.supabase.co/storage/v1/object/public/receipts/expense%20logo.webp",
+    "<meta name=\"theme-color\" content=\"#0A84FF\">"
 )
 
 
