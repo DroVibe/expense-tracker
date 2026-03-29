@@ -12,7 +12,7 @@ from shared import (
     CATEGORIES, load_expenses, insert_expense, update_expense,
     upload_receipt, upload_settlement_proof, delete_file,
     calc_balances, payer_share,
-)
+
 
 st.set_page_config(
     page_title="Co-Parent Expense Tracker",
@@ -21,17 +21,14 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Custom manifest + PWA meta tags for Add-to-Home-Screen on iOS/Android
-st.markdown(
-    """
-    <link rel="manifest" href="manifest.json">
-    <link rel="apple-touch-icon" href="https://yniabqpsbubnzgdhbkpo.supabase.co/storage/v1/object/public/receipts/expense%20logo.webp">
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-title" content="Co-Parent Expense Tracker">
-    <meta name="theme-color" content="#0A84FF">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    """,
-    unsafe_allow_html=True,
+
+# PWA / Add-to-Home-Screen meta tags
+st.html(
+    "<link rel=\"manifest\" href=\"/manifest.json\">"
+    "<link rel=\"apple-touch-icon\" href=\"https://yniabqpsbubnzgdhbkpo.supabase.co/storage/v1/object/public/receipts/expense%2520logo.webp\">"
+    "<meta name=\"apple-mobile-web-app-capable\" content=\"yes\">"
+    "<meta name=\"apple-mobile-web-app-title\" content=\"Co-Parent Expense Tracker\">"
+    "<meta name=\"theme-color\" content=\"#0A84FF\">"
 )
 
 # ─── SESSION STATE ────────────────────────────────────────────────────────────
