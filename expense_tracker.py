@@ -44,6 +44,35 @@ if supabase is None:
     )
     st.stop()
 
+# ─── AUTH GATE ───────────────────────────────────────────────────────────────
+
+APP_PIN = st.secrets.get("APP_PIN", "")
+if APP_PIN:
+    if not st.session_state.get("_auth_ok"):
+        st.markdown("""
+            <style>
+            .pin-card {
+                max-width: 420px;
+                margin: 10vh auto;
+                text-align: center;
+            }
+            </style>
+            <div class="pin-card">
+                <h2>🧾 Co-Parent Expense Tracker</h2>
+                <p style="color:#94a3b8;">Enter your PIN to access the tracker.</p>
+            </div>
+        """, unsafe_allow_html=True)
+        with st.form("pin_form", clear_on_submit=False):
+            pin = st.text_input("PIN", type="password", placeholder="Enter PIN", label_visibility="collapsed")
+            submitted = st.form_submit_button("Unlock", use_container_width=True)
+        if submitted:
+            if pin == APP_PIN:
+                st.session_state["_auth_ok"] = True
+                st.rerun()
+            else:
+                st.error("Incorrect PIN.")
+        st.stop()
+
 # ─── IDENTITY GATE ────────────────────────────────────────────────────────────
 
 if st.session_state["identity"] is None:
