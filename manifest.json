@@ -5,5 +5,12 @@
   "display": "standalone",
   "background_color": "#0f172a",
   "theme_color": "#0A84FF",
-  "orientation": "portrait"
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "https://yniabqpsbubnzgdhbkpo.supabase.co/storage/v1/object/public/receipts/expense%20logo.webp",
+      "sizes": "any",
+      "type": "image/webp"
+    }
+  ]
 }
