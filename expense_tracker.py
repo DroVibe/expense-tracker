@@ -3,6 +3,7 @@ Co-Parent Expense Tracker — Dashboard
 Balances, quick-add, settle up with proof upload, and monthly summary.
 """
 
+from PIL import Image
 import streamlit as st
 import pandas as pd
 from datetime import date, datetime
@@ -16,7 +17,7 @@ from shared import (
 
 st.set_page_config(
     page_title="Co-Parent Expense Tracker",
-    page_icon="🛡️",
+    page_icon=Image("icon.png"),
     layout="centered",
     initial_sidebar_state="collapsed",
 )
@@ -25,9 +26,11 @@ st.set_page_config(
 st.markdown(
     """
     <link rel="manifest" href="manifest.json">
+    <link rel="apple-touch-icon" href="/icon.png">
     <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-title" content="Expense Tracker">
+    <meta name="apple-mobile-web-app-title" content="Co-Parent Expense Tracker">
     <meta name="theme-color" content="#0A84FF">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     """,
     unsafe_allow_html=True,
 )
